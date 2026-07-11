@@ -6,6 +6,7 @@ on:
     paths:
       - 'apps/minecraft-controller/**'
       - 'shared/**'
+      - '.github/workflows/deploy-minecraft.yml'
 
 jobs:
   build-and-deploy:
@@ -19,7 +20,9 @@ jobs:
       with:
         go-version: '1.22'
 
-    # ディレクトリを移動せず、ルートからモジュールを指定してクロスコンパイル
+    - name: Sync Go Workspace
+      run: go work sync
+
     - name: Build Binary
       run: |
         GOOS=linux GOARCH=amd64 go build -o apps/minecraft-controller/minecraft-controller ./apps/minecraft-controller
