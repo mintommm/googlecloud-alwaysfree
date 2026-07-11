@@ -19,11 +19,10 @@ jobs:
       with:
         go-version: '1.22'
 
-    # Linux (always-free) 向けにクロスコンパイル
+    # ディレクトリを移動せず、ルートからモジュールを指定してクロスコンパイル
     - name: Build Binary
       run: |
-        cd apps/minecraft-controller
-        GOOS=linux GOARCH=amd64 go build -o minecraft-controller main.go
+        GOOS=linux GOARCH=amd64 go build -o apps/minecraft-controller/minecraft-controller ./apps/minecraft-controller
 
     # 実行バイナリをGCEインスタンスにSSH転送
     - name: Deploy to GCE via SSH
