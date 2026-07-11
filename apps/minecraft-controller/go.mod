@@ -2,7 +2,10 @@ module github.com/mintommm/googlecloud-alwaysfree/apps/minecraft-controller
 
 go 1.26.4
 
-require google.golang.org/api v0.288.0
+require (
+	github.com/bwmarrin/discordgo v0.29.0
+	google.golang.org/api v0.288.0
+)
 
 require (
 	cloud.google.com/go/auth v0.20.0 // indirect
@@ -16,6 +19,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.17 // indirect
 	github.com/googleapis/gax-go/v2 v2.22.0 // indirect
+	github.com/gorilla/websocket v1.4.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect
 	go.opentelemetry.io/otel v1.43.0 // indirect
