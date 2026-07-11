@@ -20,11 +20,11 @@ jobs:
       with:
         go-version: '1.22'
 
-    # ディレクトリ配下に移動してビルドすることで、当該 go.mod に記載された依存関係を自動ダウンロードさせる
+    # GOWORK=off を指定してワークスペースの干渉を完全に排除し、単一モジュールとしてビルド
     - name: Build Binary
       run: |
         cd apps/minecraft-controller
-        GOOS=linux GOARCH=amd64 go build -o minecraft-controller .
+        GOWORK=off GOOS=linux GOARCH=amd64 go build -o minecraft-controller .
 
     # 実行バイナリをGCEインスタンスにSSH転送
     - name: Deploy to GCE via SSH
