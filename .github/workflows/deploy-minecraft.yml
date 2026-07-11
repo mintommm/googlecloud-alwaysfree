@@ -20,16 +20,11 @@ jobs:
       with:
         go-version: '1.22'
 
-    # ワークスペース配下の全モジュールの依存関係を事前にダウンロードする
-    - name: Download Dependencies
-      run: |
-        go work use -r .
-        go mod download -json github.com/bwmarrin/discordgo google.golang.org/api/compute/v1 google.golang.org/api/option
-
-    # 依存関係が解決された状態でクロスコンパイル
+    # ディレクトリ配下に移動してビルドすることで、当該 go.mod に記載された依存関係を自動ダウンロードさせる
     - name: Build Binary
       run: |
-        GOOS=linux GOARCH=amd64 go build -o apps/minecraft-controller/minecraft-controller ./apps/minecraft-controller
+        cd apps/minecraft-controller
+        GOOS=linux GOARCH=amd64 go build -o minecraft-controller .
 
     # 実行バイナリをGCEインスタンスにSSH転送
     - name: Deploy to GCE via SSH
