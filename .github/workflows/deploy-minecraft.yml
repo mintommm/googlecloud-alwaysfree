@@ -35,3 +35,13 @@ jobs:
         source: "apps/minecraft-controller/minecraft-controller"
         target: "/home/github-actions/apps/minecraft-controller"
         strip_components: 2
+
+    # インスタンス側でBotサービスを再起動して最新バイナリを適用
+    - name: Restart Service via SSH
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.INSTANCE_IP }}
+        username: github-actions
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          sudo systemctl restart minecraft-controller.service
