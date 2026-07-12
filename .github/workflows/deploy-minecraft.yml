@@ -9,6 +9,7 @@ on:
       - 'infrastructure/minecraft-controller.service'
       - 'go.work'
       - '.github/workflows/deploy-minecraft.yml'
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
