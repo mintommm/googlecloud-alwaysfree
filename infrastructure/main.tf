@@ -15,7 +15,7 @@ resource "google_compute_instance" "minecraft01" {
   network_interface {
     network = "default"
     access_config {
-      // エフェメラル外部IP（動的割り当て）
+      // エフェメラル外部IP
     }
   }
 
@@ -23,6 +23,7 @@ resource "google_compute_instance" "minecraft01" {
     startup-script = templatefile("${path.module}/scripts/minecraft-startup.sh", {
       rcon_password    = var.rcon_password
       allow_list_users = var.allow_list_users
+      bot_internal_ip  = google_compute_instance.always_free.network_interface[0].network_ip
     })
   }
 
@@ -37,7 +38,7 @@ resource "google_compute_instance" "always_free" {
   name         = var.always_free_name
   machine_type = "e2-micro"
   zone         = var.always_free_zone
-  tags         = []
+  tags         = ["always-free-bot"]
 
   boot_disk {
     initialize_params {
