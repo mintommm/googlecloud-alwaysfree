@@ -37,3 +37,8 @@ variable "allow_list_users" {
   type      = string
   sensitive = true
 }
+
+variable "ssh_public_key" {
+  type      = string
+  sensitive = true
+}

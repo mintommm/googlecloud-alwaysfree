@@ -27,10 +27,23 @@ jobs:
         run: |
           GOOS=linux GOARCH=amd64 go build -o apps/minecraft-controller/minecraft-controller ./apps/minecraft-controller
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Get Always-Free External IP
+        id: gce-ip
+        run: |
+          IP=$(gcloud compute instances describe always-free \
+            --zone=us-central1-a \
+            --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+          echo "ip=$IP" >> $GITHUB_OUTPUT
+
       - name: Deploy Binary via SSH
         uses: appleboy/scp-action@master
         with:
-          host: ${{ secrets.INSTANCE_IP }}
+          host: ${{ steps.gce-ip.outputs.ip }}
           username: github-actions
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "apps/minecraft-controller/minecraft-controller"
@@ -40,7 +53,7 @@ jobs:
       - name: Generate Configs and Restart User Service via SSH
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ secrets.INSTANCE_IP }}
+          host: ${{ steps.gce-ip.outputs.ip }}
           username: github-actions
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |

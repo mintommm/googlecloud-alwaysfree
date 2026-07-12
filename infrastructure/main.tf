@@ -58,6 +58,28 @@ resource "google_compute_instance" "always_free" {
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
   }
 
+  metadata = {
+    startup-script = <<-EOT
+      #!/bin/bash
+      set -euo pipefail
+
+      # ユーザーが存在しない場合のみ作成
+      if ! id -u github-actions >/dev/null 2>&1; then
+        useradd -m -s /bin/bash github-actions
+      fi
+
+      # systemd --user の永続化（Linger）を有効化
+      loginctl enable-linger github-actions
+
+      # SSH公開鍵の配置と権限適正化
+      mkdir -p /home/github-actions/.ssh
+      chmod 700 /home/github-actions/.ssh
+      echo "${var.ssh_public_key}" > /home/github-actions/.ssh/authorized_keys
+      chmod 600 /home/github-actions/.ssh/authorized_keys
+      chown -R github-actions:github-actions /home/github-actions/.ssh
+    EOT
+  }
+
   lifecycle {
     prevent_destroy = true
     ignore_changes = [
