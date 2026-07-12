@@ -1,0 +1,51 @@
+name: 'Terraform Deploy'
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**.tf'
+      - 'scripts/minecraft-startup.sh'
+      - '.github/workflows/deploy-infra.yml'
+
+permissions:
+  contents: 'read'
+  id-token: 'write'
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: 'ubuntu-latest'
+
+    env:
+      TF_VAR_rcon_password: ${{ secrets.RCON_PASSWORD }}
+
+    steps:
+      # 1. リポジトリのコードをチェックアウト
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      # 2. Google Cloud に対する認証を実行
+      - name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # 3. Terraform CLI のセットアップ
+      - name: 'Setup Terraform'
+        uses: 'hashicorp/setup-terraform@v3'
+        with:
+          terraform_version: '1.5.7'
+
+      # 4. バックエンド（GCS）との同期および初期化
+      - name: 'Terraform Init'
+        run: 'terraform init'
+
+      # 5. 実行計画の作成と整合性チェック
+      - name: 'Terraform Plan'
+        run: 'terraform plan -input=false'
+
+      # 6. インフラへの変更適用（自動承認）
+      - name: 'Terraform Apply'
+        run: 'terraform apply -auto-approve -input=false'
