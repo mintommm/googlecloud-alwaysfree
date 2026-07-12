@@ -6,6 +6,7 @@ on:
     paths:
       - 'apps/minecraft-controller/**'
       - 'shared/**'
+      - 'infrastructure/minecraft-controller.service'
       - 'go.work'
       - '.github/workflows/deploy-minecraft.yml'
 
@@ -25,21 +26,46 @@ jobs:
         run: |
           GOOS=linux GOARCH=amd64 go build -o apps/minecraft-controller/minecraft-controller ./apps/minecraft-controller
 
-      - name: Deploy to GCE via SSH
+      - name: Deploy Binary and Service Template via SSH
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.INSTANCE_IP }}
           username: github-actions
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "apps/minecraft-controller/minecraft-controller"
+          source: "apps/minecraft-controller/minecraft-controller,infrastructure/minecraft-controller.service"
           target: "/home/github-actions/apps/minecraft-controller"
           strip_components: 2
 
-      - name: Restart Service via SSH
+      - name: Generate Environment File and Restart Service via SSH
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.INSTANCE_IP }}
           username: github-actions
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            # 1. GitHub Secrets から値を注入し、.env ファイルを動的生成
+            cat << 'EOF' > /home/github-actions/apps/minecraft-controller/.env
+            DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
+            DISCORD_GUILD_ID=${{ secrets.DISCORD_GUILD_ID }}
+            MC_ZONE=asia-northeast1-a
+            MC_INSTANCE_NAME=minecraft01
+            CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}
+            CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}
+            CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}
+            RCON_PASSWORD=${{ secrets.RCON_PASSWORD }}
+            DISCORD_NOTIFICATION_CHANNEL_ID=${{ secrets.DISCORD_NOTIFICATION_CHANNEL_ID }}
+            EOF
+
+            # 2. 環境変数ファイルの権限を厳格化
+            chmod 600 /home/github-actions/apps/minecraft-controller/.env
+
+            # 3. 転送された service ファイルをシステム領域へコピー
+            sudo cp /home/github-actions/apps/minecraft-controller/infrastructure/minecraft-controller.service /etc/systemd/system/minecraft-controller.service
+
+            # 4. ユニットファイルの所有権と権限を適正化
+            sudo chmod 644 /etc/systemd/system/minecraft-controller.service
+            sudo chown root:root /etc/systemd/system/minecraft-controller.service
+
+            # 5. systemdのデーモンリロードとサービス再起動
+            sudo systemctl daemon-reload
             sudo systemctl restart minecraft-controller.service

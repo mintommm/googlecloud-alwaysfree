@@ -1,0 +1,18 @@
+[Unit]
+Description=Minecraft Controller Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+User=github-actions
+WorkingDirectory=/home/github-actions/apps/minecraft-controller
+ExecStart=/home/github-actions/apps/minecraft-controller/minecraft-controller
+
+# デプロイ時に自動生成される環境変数ファイルを指定
+EnvironmentFile=/home/github-actions/apps/minecraft-controller/.env
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
