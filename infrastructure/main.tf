@@ -41,8 +41,9 @@ resource "google_compute_instance" "always_free" {
 
   boot_disk {
     initialize_params {
-      size = 30
-      type = "pd-standard"
+      image = "debian-cloud/debian-12"
+      size  = 30
+      type  = "pd-standard"
     }
   }
 
@@ -59,19 +60,8 @@ resource "google_compute_instance" "always_free" {
   }
 
   metadata = {
-    # GCE標準のエージェント機構による安全なSSH鍵・ユーザー自動構成
-    ssh-keys = "github-actions:${var.ssh_public_key}"
-
-    # ユーザー生成を確認した後に非同期で常駐化（Linger）のみを有効化するスクリプト
-    startup-script = <<-EOT
-      #!/bin/bash
-      (
-        while ! id -u github-actions >/dev/null 2>&1; do
-          sleep 2
-        done
-        loginctl enable-linger github-actions
-      ) &
-    EOT
+    # GCPベストプラクティス：OS Loginをプロジェクト統合モードで強制有効化
+    enable-oslogin = "TRUE"
   }
 
   lifecycle {
