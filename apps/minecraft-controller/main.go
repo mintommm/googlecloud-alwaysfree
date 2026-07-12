@@ -10,13 +10,14 @@ import (
 	"syscall"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"github.com/bwmarrin/discordgo"
 	"github.com/cloudflare/cloudflare-go"
 	"github.com/gorcon/rcon"
 	"google.golang.org/api/compute/v1"
 )
 
-// 環境変数からの設定値保持
+// 環境変数およびメタデータからの設定値保持
 var (
 	DiscordToken         string
 	GuildID              string
@@ -44,7 +45,6 @@ var state = BotState{
 func init() {
 	DiscordToken = os.Getenv("DISCORD_TOKEN")
 	GuildID = os.Getenv("DISCORD_GUILD_ID")
-	ProjectID = "mintommm-alwaysfree-gce" // 固定プロジェクトID
 	Zone = os.Getenv("MC_ZONE")
 	InstanceName = os.Getenv("MC_INSTANCE_NAME")
 	CFAPIToken = os.Getenv("CF_API_TOKEN")
@@ -59,6 +59,14 @@ func init() {
 }
 
 func main() {
+	// GCEメタデータサーバーから実行環境のプロジェクトIDを動的に取得
+	var err error
+	ProjectID, err = metadata.ProjectID()
+	if err != nil {
+		log.Fatalf("GCPプロジェクトIDの自動取得に失敗しました: %v", err)
+	}
+	log.Printf("検出されたGCPプロジェクトID: %s", ProjectID)
+
 	dg, err := discordgo.New("Bot " + DiscordToken)
 	if err != nil {
 		log.Fatalf("Discordセッション作成エラー: %v", err)
@@ -75,7 +83,7 @@ func main() {
 	log.Println("コマンドを登録中...")
 	registerCommands(dg)
 
-	log.Println("Botが起動しました。Ctrl+Cで終了します。")
+	log.Println("Botが起動しました。常駐監視を開始します。")
 
 	// 分単位のRCONポーリング監視タスクをバックグラウンドで開始
 	go startPollingTicker(dg)
@@ -215,7 +223,6 @@ func sendPanel(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func handleCmd(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// 管理者権限チェック (Administrator: 0x8)
 	if i.Member.Permissions&discordgo.PermissionAdministrator == 0 {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -271,7 +278,6 @@ func executeStartSequence(s *discordgo.Session, i *discordgo.InteractionCreate) 
 	ctx := context.Background()
 	computeService, _ := compute.NewService(ctx)
 
-	// Phase 1: インスタンスの起動
 	_, err := computeService.Instances.Start(ProjectID, Zone, InstanceName).Context(ctx).Do()
 	if err != nil {
 		errContent := fmt.Sprintf("❌ GCEの起動に失敗しました: %v", err)
@@ -279,7 +285,6 @@ func executeStartSequence(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		return
 	}
 
-	// Phase 2: RUNNING 状態の監視
 	content = "🔄 **サーバー起動プロセスを開始しました**\n🔄 [処理中] GCEインスタンスの状態を検証中 (RUNNING待ち)"
 	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &content})
 
@@ -295,7 +300,6 @@ func executeStartSequence(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		time.Sleep(5 * time.Second)
 	}
 
-	// Phase 3: Cloudflare DNSレコードの動的更新
 	content = "🔄 **サーバー起動プロセスを開始しました**\n✅ [完了] GCEインスタンス起動成功\n🔄 [処理中] Cloudflare DNSレコードのAレコードを更新中"
 	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &content})
 
@@ -314,7 +318,6 @@ func executeStartSequence(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		log.Printf("DNS更新警告 (スキップして続行): %v", err)
 	}
 
-	// Phase 4: マイクラプロセス（RCON疎通）の検証
 	content = "🔄 **サーバー起動プロセスを開始しました**\n✅ [完了] GCEインスタンス起動成功\n✅ [完了] Cloudflare DNS更新完了\n🔄 [処理中] マインクラフトサーバープログラムの疎通確認中 (RCON待ち)"
 	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &content})
 
@@ -405,6 +408,7 @@ func startPollingTicker(dg *discordgo.Session) {
 				msg := "📥 **通知:** サーバー内のプレイヤーが0名になりました。このまま状態が維持された場合、1時間後に自動的にシャットダウンします。"
 				dg.ChannelMessageSend(NotificationChannel, msg)
 			} else {
+				// 滞在プレイヤーが0名になってからの経過時間を1時間に設定
 				if time.Since(state.emptyStartTime) >= 1*time.Hour {
 					msg := "🛑 **自動シャットダウン判定:** プレイヤー0名の状態が1時間継続したため、サーバーの自動停止処理を実行します。"
 					dg.ChannelMessageSend(NotificationChannel, msg)
