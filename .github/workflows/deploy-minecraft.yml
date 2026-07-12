@@ -36,24 +36,23 @@ jobs:
           target: "/home/github-actions/apps/minecraft-controller"
           strip_components: 2
 
-      - name: Deploy Service Template via SSH
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.INSTANCE_IP }}
-          username: github-actions
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "infrastructure/minecraft-controller.service"
-          target: "/home/github-actions/apps/minecraft-controller"
-          strip_components: 1
-
-      - name: Generate Environment File and Restart Service via SSH
+      - name: Generate Configs and Restart User Service via SSH
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.INSTANCE_IP }}
           username: github-actions
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            # 1. 環境変数ファイルの動的生成
+            set -e
+
+            # 非インタラクティブSSHセッションで systemd --user を捕捉可能にするための定義
+            export XDG_RUNTIME_DIR=/run/user/$(id -u)
+
+            # 1. ユーザー空間のディレクトリ群を自動生成（自所有権のため Permission denied は発生しない）
+            mkdir -p /home/github-actions/.config/systemd/user
+            mkdir -p /home/github-actions/apps/minecraft-controller
+
+            # 2. 環境変数ファイルの動的生成
             cat << 'EOF' > /home/github-actions/apps/minecraft-controller/.env
             DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
             DISCORD_GUILD_ID=${{ secrets.DISCORD_GUILD_ID }}
@@ -68,12 +67,25 @@ jobs:
 
             chmod 600 /home/github-actions/apps/minecraft-controller/.env
 
-            # 2. 転送された正しいserviceファイルをシステム領域へコピー
-            sudo cp /home/github-actions/apps/minecraft-controller/minecraft-controller.service /etc/systemd/system/minecraft-controller.service
+            # 3. ユーザーサービス定義ファイルの動的生成
+            cat << 'EOF' > /home/github-actions/.config/systemd/user/minecraft-controller.service
+            [Unit]
+            Description=Minecraft Controller Discord Bot
+            After=network.target
 
-            sudo chmod 644 /etc/systemd/system/minecraft-controller.service
-            sudo chown root:root /etc/systemd/system/minecraft-controller.service
+            [Service]
+            Type=simple
+            WorkingDirectory=/home/github-actions/apps/minecraft-controller
+            EnvironmentFile=/home/github-actions/apps/minecraft-controller/.env
+            ExecStart=/home/github-actions/apps/minecraft-controller/minecraft-controller
+            Restart=always
+            RestartSec=5
 
-            # 3. 反映と再起動
-            sudo systemctl daemon-reload
-            sudo systemctl restart minecraft-controller.service
+            [Install]
+            WantedBy=default.target
+            EOF
+
+            # 4. ユーザー特権でのサービス有効化および再起動
+            systemctl --user daemon-reload
+            systemctl --user enable minecraft-controller.service
+            systemctl --user restart minecraft-controller.service
