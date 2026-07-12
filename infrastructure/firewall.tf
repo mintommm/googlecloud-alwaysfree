@@ -12,20 +12,6 @@ resource "google_compute_firewall" "allow_minecraft_bedrock" {
   direction     = "INGRESS"
 }
 
-resource "google_compute_firewall" "allow_minecraft_rcon_internal" {
-  name    = "allow-minecraft-rcon-internal"
-  network = "default"
-
-  allow {
-    protocol = "tcp"
-    ports    = ["25575"]
-  }
-
-  source_ranges = ["10.0.0.0/8"]
-  target_tags   = ["minecraft-server"]
-  direction     = "INGRESS"
-}
-
 resource "google_compute_firewall" "allow_ssh" {
   name    = "allow-ssh-iap"
   network = "default"
