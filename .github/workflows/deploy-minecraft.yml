@@ -6,6 +6,7 @@ on:
     paths:
       - 'apps/minecraft-controller/**'
       - 'shared/**'
+      - 'go.work'
       - '.github/workflows/deploy-minecraft.yml'
 
 jobs:
@@ -22,7 +23,6 @@ jobs:
 
       - name: Build Binary
         run: |
-          # go build 実行時に依存モジュールは自動的に解決・取得される
           GOOS=linux GOARCH=amd64 go build -o apps/minecraft-controller/minecraft-controller ./apps/minecraft-controller
 
       - name: Deploy to GCE via SSH
