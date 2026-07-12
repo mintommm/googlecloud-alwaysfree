@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 )
 
 var (
@@ -30,21 +31,18 @@ type LogLine struct {
 	Message   string
 }
 
-type SafeLogBuffer struct {
-	mu    sync.Mutex
-	lines []LogLine
-}
-
+// グローバルステート管理
 var (
-	GlobalLogBuffer SafeLogBuffer
 	CurrentPlayers  = 0
 	PlayersMutex    sync.Mutex
 	isTimerActive   = false
 	emptyStartTime  time.Time
 	streamCancel    context.CancelFunc
 	streamMu        sync.Mutex
+	cmdListeners    sync.Map // key: string(uuid), value: chan string
 )
 
+// ログ解析用の正規表現
 var (
 	regexPlayerJoin = regexp.MustCompile(`Player connected:\s+([^,]+)`)
 	regexPlayerLeft = regexp.MustCompile(`Player disconnected:\s+([^,]+)`)
@@ -83,6 +81,7 @@ func main() {
 		{Name: "start", Description: "マインクラフトサーバーを起動します"},
 		{Name: "stop", Description: "マインクラフトサーバーを停止します"},
 		{Name: "status", Description: "サーバーのステータスとオンライン人数を確認します"},
+		{Name: "panel", Description: "サーバー制御用のボタンパネルを表示します"},
 		{
 			Name:        "cmd",
 			Description: "サーバー内で直接コマンドを実行します",
@@ -113,37 +112,7 @@ func main() {
 	}
 }
 
-func (b *SafeLogBuffer) Append(msg string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	now := time.Now()
-	b.lines = append(b.lines, LogLine{Timestamp: now, Message: msg})
-
-	cutoff := now.Add(-30 * time.Second)
-	idx := 0
-	for i, line := range b.lines {
-		if line.Timestamp.After(cutoff) {
-			idx = i
-			break
-		}
-	}
-	if idx > 0 {
-		b.lines = b.lines[idx:]
-	}
-}
-
-func (b *SafeLogBuffer) ExtractSince(since time.Time) []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	var result []string
-	for _, line := range b.lines {
-		if line.Timestamp.After(since) || line.Timestamp.Equal(since) {
-			result = append(result, line.Message)
-		}
-	}
-	return result
-}
-
+// 常時ストリーミングの開始・リトライライフサイクル管理
 func manageStreamLifecycle(dg *discordgo.Session) {
 	streamMu.Lock()
 	if streamCancel != nil {
@@ -190,7 +159,6 @@ func stopLogStream() {
 }
 
 func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
-	// 【不具合①対策】 --tail=20 を指定し、フフライング接続時でも直近のServer started.を見落とさない構造へ変更
 	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
 		"--zone="+Zone,
 		"--tunnel-through-iap",
@@ -213,7 +181,18 @@ func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
-		GlobalLogBuffer.Append(line)
+
+		// アクティブなコマンド待機ゴルーチン（チャネル群）へログ行をブロードキャスト（ファンアウト）
+		cmdListeners.Range(func(key, value interface{}) bool {
+			if ch, ok := value.(chan string); ok {
+				select {
+				case ch <- line:
+				default: // チャネルが詰まっている場合はスキップしてデッドロックを防止
+				}
+			}
+			return true
+		})
+
 		handleLogLineEvents(dg, line)
 	}
 
@@ -331,12 +310,10 @@ func syncOnlinePlayersDirect() {
 }
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// 【不具合②対策】 スラッシュコマンドに加え、メッセージコンポーネント(ボタン)の判定空間を解放
 	if i.Type != discordgo.InteractionApplicationCommand && i.Type != discordgo.InteractionMessageComponent {
 		return
 	}
 
-	// 呼び出し元のコンテキストに応じてアクション名を透過的にマッピング
 	var actionName string
 	if i.Type == discordgo.InteractionApplicationCommand {
 		actionName = i.ApplicationCommandData().Name
@@ -345,6 +322,36 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	switch actionName {
+	case "panel":
+		// コントロールパネルの初期表示要求に対する同期返信（3秒ルール充足）
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "🎛️ **マインクラフトサーバー 遠隔制御パネル**\n以下のボタンからインスタンスおよびプロセスの状態を操作できます。",
+				Components: []discordgo.MessageComponent{
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.Button{
+								Label:    "サーバー起動",
+								Style:    discordgo.SuccessButton,
+								CustomID: "start",
+							},
+							discordgo.Button{
+								Label:    "サーバー停止",
+								Style:    discordgo.DangerButton,
+								CustomID: "stop",
+							},
+							discordgo.Button{
+								Label:    "ステータス確認",
+								Style:    discordgo.PrimaryButton,
+								CustomID: "status",
+							},
+						},
+					},
+				},
+			},
+		})
+
 	case "start":
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -389,7 +396,6 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	case "cmd":
 		var minecraftCmd string
-		// スラッシュコマンドからの呼び出し時のみ、配列から引数を抽出
 		if i.Type == discordgo.InteractionApplicationCommand {
 			options := i.ApplicationCommandData().Options
 			if len(options) > 0 {
@@ -409,8 +415,13 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("コマンド `%s` を標準入力ストリームへインジェクション中...", minecraftCmd)},
 		})
+
 		go func() {
-			startTime := time.Now()
+			// 【最適化】動的無出力インターバル（Idle Timeout）監視ロジック
+			listenerID := uuid.New().String()
+			ch := make(chan string, 100)
+			cmdListeners.Store(listenerID, ch)
+			defer cmdListeners.Delete(listenerID)
 
 			remoteCommand := fmt.Sprintf("docker exec minecraft-bedrock send-command \"%s\"", minecraftCmd)
 			_, err := executeRemoteCommandGetStdout(remoteCommand)
@@ -419,9 +430,34 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				return
 			}
 
-			time.Sleep(2 * time.Second)
+			var capturedLogs []string
+			idleTimer := time.NewTimer(500 * time.Millisecond) // 500msの無通信タイムアウトタイマー
+			globalTimeout := time.After(5 * time.Second)       // コマンド処理の最大実行猶予（5秒）
 
-			capturedLogs := GlobalLogBuffer.ExtractSince(startTime)
+			loop := true
+			for loop {
+				select {
+				case line := <-ch:
+					capturedLogs = append(capturedLogs, line)
+					// 新しいログが流れてきたため、無通信タイムアウトタイマーを停止・再初期化
+					if !idleTimer.Stop() {
+						select {
+						case <-idleTimer.C:
+						default:
+						}
+					}
+					idleTimer.Reset(500 * time.Millisecond)
+
+				case <-idleTimer.C:
+					// 500msの間、新しいログ行が一切流れなくなったため、応答出力完了とみなしループ脱出
+					loop = false
+
+				case <-globalTimeout:
+					// サーバー高負荷等に備えた安全装置（最大猶予到達による強制ブレイク）
+					loop = false
+				}
+			}
+
 			if len(capturedLogs) == 0 {
 				_, _ = s.ChannelMessageSend(i.ChannelID, "【実行完了】コマンドは送信されましたが、直後のログ出力は空でした。")
 				return
