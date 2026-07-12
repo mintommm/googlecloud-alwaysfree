@@ -320,7 +320,7 @@ func isGCEInstanceRunning() bool {
 
 // 再接続時や起動時に単発で list コマンドを発行し、インメモリ人数を実態に合わせるロジック
 func syncOnlinePlayersDirect() {
-	out, err := executeRemoteCommandGetStdout("docker exec minecraft-bedrock send-command list")
+	_, err := executeRemoteCommandGetStdout("docker exec minecraft-bedrock send-command list")
 	if err != nil {
 		return
 	}
@@ -412,7 +412,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				return
 			}
 
-			// 2. 確定要件：コマンド処理、ログ出力、およびストリーム経由のキャッシュ到達のための「2秒ディレイ」
+			// 2. コマンド処理、ログ出力、およびストリーム経由のキャッシュ到達のための「2秒ディレイ」
 			time.Sleep(2 * time.Second)
 
 			// 3. 共有タイムバッファから、実行時刻以降に追記された生ログ行を全抽出して返却
