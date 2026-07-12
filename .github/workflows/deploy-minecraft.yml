@@ -35,12 +35,10 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      # シェルのエスケープバグを恒久対策するため、ランナーのローカル空間でコンフィグを安全に事前生成
       - name: Generate Config Files Locally
         run: |
           mkdir -p tmp
 
-          # 永続化環境変数ファイルの生成
           cat << 'EOF' > tmp/.env
           DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
           DISCORD_GUILD_ID=${{ secrets.DISCORD_GUILD_ID }}
@@ -53,7 +51,6 @@ jobs:
           DISCORD_NOTIFICATION_CHANNEL_ID=${{ secrets.DISCORD_NOTIFICATION_CHANNEL_ID }}
           EOF
 
-          # systemd ユーザー空間サービス定義の生成 (%h により動的ユーザーのホームディレクトリを自動展開)
           cat << 'EOF' > tmp/minecraft-controller.service
           [Unit]
           Description=Minecraft Controller Discord Bot
@@ -73,19 +70,29 @@ jobs:
 
       - name: Deploy Configs and Binary via IAP Tunneling
         run: |
-          # 1. 動的ユーザー空間に対する常駐化特権（Linger）の最優先有効化およびディレクトリ自動生成
-          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --command="
-            loginctl enable-linger
+          # 1. 動的ユーザー名とUIDを特定し、systemdユーザーインスタンスを明示的に強制起動
+          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --command='
+            set -e
+            CURRENT_USER=$(whoami)
+            CURRENT_UID=$(id -u)
+
+            # 永続化の有効化
+            sudo loginctl enable-linger "$CURRENT_USER"
+
+            # 非ログインセッション下でユーザーマネージャーインスタンスを強制起動（バスの生成）
+            sudo systemctl start user@"$CURRENT_UID"
+
+            # ディレクトリの事前作成
             mkdir -p ~/.config/systemd/user
             mkdir -p ~/apps/minecraft-controller
-          "
+          '
 
-          # 2. コンポーネント群をIAP暗号化トンネル経由で安全に一括転送
+          # 2. 生成されたバス空間を対象とした一括ファイル転送
           gcloud compute scp apps/minecraft-controller/minecraft-controller always-free:~/apps/minecraft-controller/ --zone=us-central1-a --tunnel-through-iap
           gcloud compute scp tmp/.env always-free:~/apps/minecraft-controller/ --zone=us-central1-a --tunnel-through-iap
           gcloud compute scp tmp/minecraft-controller.service always-free:~/.config/systemd/user/ --zone=us-central1-a --tunnel-through-iap
 
-          # 3. リモートランタイムでの権限変更および systemd デーモンの再起動リロード
+          # 3. 確立された環境変数を明示的に指定してサービスを制御
           gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --command='
             set -e
             export XDG_RUNTIME_DIR=/run/user/$(id -u)
