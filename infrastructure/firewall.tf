@@ -12,8 +12,8 @@ resource "google_compute_firewall" "allow_minecraft_bedrock" {
   direction     = "INGRESS"
 }
 
-resource "google_compute_firewall" "allow_minecraft_rcon_internal" {
-  name    = "allow-minecraft-rcon-internal"
+resource "google_compute_firewall" "allow_minecraft_rcon" {
+  name    = "allow-minecraft-rcon"
   network = "default"
 
   allow {
@@ -21,7 +21,7 @@ resource "google_compute_firewall" "allow_minecraft_rcon_internal" {
     ports    = ["25575"]
   }
 
-  source_ranges = ["10.0.0.0/8"]
+  source_ranges = ["10.128.0.50/32"]
   target_tags   = ["minecraft-server"]
   direction     = "INGRESS"
 }

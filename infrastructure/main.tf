@@ -40,7 +40,7 @@ resource "google_compute_instance" "always_free" {
 
   boot_disk {
     initialize_params {
-      image = "debian-cloud/debian-12"
+      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
       size  = 30
       type  = "pd-standard"
     }
