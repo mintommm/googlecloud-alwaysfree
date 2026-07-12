@@ -35,20 +35,10 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          version: "latest"
-          enable-cache: false
-
-      - name: Install NumPy via uv for IAP acceleration
+      - name: Install NumPy into gcloud active Python environment
         run: |
-          uv pip install numpy
+          GCLOUD_PYTHON=$(gcloud info --format="value(basic.python_location)")
+          $GCLOUD_PYTHON -m pip install --user --break-system-packages numpy
 
       - name: Generate Config Files Locally
         run: |
