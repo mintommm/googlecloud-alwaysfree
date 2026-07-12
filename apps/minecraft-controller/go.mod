@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
+	github.com/gorcon/rcon v1.4.0
 	google.golang.org/api v0.288.0
 )
 
