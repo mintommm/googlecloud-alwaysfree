@@ -40,8 +40,9 @@ resource "google_compute_instance" "always_free" {
 
   boot_disk {
     initialize_params {
-      size = 30
-      type = "pd-standard"
+      image = "debian-cloud/debian-12"
+      size  = 30
+      type  = "pd-standard"
     }
   }
 
