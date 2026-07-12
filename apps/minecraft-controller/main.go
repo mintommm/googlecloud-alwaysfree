@@ -25,7 +25,6 @@ var (
 	NotificationChannel = os.Getenv("DISCORD_NOTIFICATION_CHANNEL_ID")
 )
 
-// 共有ログバッファの構造体（直近のログ行をスライディング保持）
 type LogLine struct {
 	Timestamp time.Time
 	Message   string
@@ -36,7 +35,6 @@ type SafeLogBuffer struct {
 	lines []LogLine
 }
 
-// グローバルステート管理
 var (
 	GlobalLogBuffer SafeLogBuffer
 	CurrentPlayers  = 0
@@ -47,7 +45,6 @@ var (
 	streamMu        sync.Mutex
 )
 
-// ログ解析用の正規表現
 var (
 	regexPlayerJoin = regexp.MustCompile(`Player connected:\s+([^,]+)`)
 	regexPlayerLeft = regexp.MustCompile(`Player disconnected:\s+([^,]+)`)
@@ -73,7 +70,6 @@ func main() {
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("Bot logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
-		// 起動時にGCEがRUNNINGであれば、自動的にログストリーミングを開始
 		go manageStreamLifecycle(dg)
 	})
 	dg.AddHandler(interactionCreate)
@@ -117,14 +113,12 @@ func main() {
 	}
 }
 
-// 共有バッファへのログ行の追記と、30秒が経過した古い行の切り捨て処理
 func (b *SafeLogBuffer) Append(msg string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := time.Now()
 	b.lines = append(b.lines, LogLine{Timestamp: now, Message: msg})
 
-	// 30秒以上前のログをスライディングクリア
 	cutoff := now.Add(-30 * time.Second)
 	idx := 0
 	for i, line := range b.lines {
@@ -138,7 +132,6 @@ func (b *SafeLogBuffer) Append(msg string) {
 	}
 }
 
-// 指定したタイムスタンプ以降にバッファに書き込まれた生ログを一括抽出
 func (b *SafeLogBuffer) ExtractSince(since time.Time) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -151,12 +144,11 @@ func (b *SafeLogBuffer) ExtractSince(since time.Time) []string {
 	return result
 }
 
-// 常時ストリーミングの開始・リトライライフサイクル管理
 func manageStreamLifecycle(dg *discordgo.Session) {
 	streamMu.Lock()
 	if streamCancel != nil {
 		streamMu.Unlock()
-		return // すでに稼働中の場合は重複起動を防止
+		return
 	}
 	var ctx context.Context
 	ctx, streamCancel = context.WithCancel(context.Background())
@@ -174,7 +166,6 @@ func manageStreamLifecycle(dg *discordgo.Session) {
 			return
 		default:
 			if isGCEInstanceRunning() {
-				// 再接続時の論理要件：単発コマンドで人数を再同期
 				syncOnlinePlayersDirect()
 
 				log.Println("【ストリーム開始】IAPキープアライブ付きでstdout常時接続を確立します。")
@@ -183,7 +174,7 @@ func manageStreamLifecycle(dg *discordgo.Session) {
 					log.Printf("ストリームプロセスが切断されました: %v。5秒後に再接続を試みます。", err)
 				}
 			}
-			time.Sleep(5 * time.Second) // インスタンス停止中または切断時のバックオフ待機
+			time.Sleep(5 * time.Second)
 		}
 	}
 }
@@ -198,22 +189,21 @@ func stopLogStream() {
 	streamMu.Unlock()
 }
 
-// SSHキープアライブオプションを強制インジェクションした永続ストリーミング実行処理
 func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
+	// 【不具合①対策】 --tail=20 を指定し、フフライング接続時でも直近のServer started.を見落とさない構造へ変更
 	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
 		"--zone="+Zone,
 		"--tunnel-through-iap",
 		"--quiet",
 		"--ssh-flag=-o ServerAliveInterval=15",
 		"--ssh-flag=-o ServerAliveCountMax=3",
-		"--command=docker logs -f --tail=0 minecraft-bedrock",
+		"--command=docker logs -f --tail=20 minecraft-bedrock",
 	)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
-	// 警告ノイズが混入する標準エラー出力は、ログ回収を汚さないよう完全に破棄または分離
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
@@ -223,14 +213,13 @@ func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
-		GlobalLogBuffer.Append(line) // 共有メモリバッファへ格納
+		GlobalLogBuffer.Append(line)
 		handleLogLineEvents(dg, line)
 	}
 
 	return cmd.Wait()
 }
 
-// ストリーム行のテキストパースとイベントフック
 func handleLogLineEvents(dg *discordgo.Session, line string) {
 	if NotificationChannel == "" {
 		return
@@ -241,18 +230,16 @@ func handleLogLineEvents(dg *discordgo.Session, line string) {
 		return
 	}
 
-	// 1. 参加イベントのフック
 	if matches := regexPlayerJoin.FindStringSubmatch(line); len(matches) > 1 {
 		player := matches[1]
 		PlayersMutex.Lock()
 		CurrentPlayers++
-		isTimerActive = false // 人数が増えたためタイマーは強制解除
+		isTimerActive = false
 		PlayersMutex.Unlock()
 		_, _ = dg.ChannelMessageSend(NotificationChannel, fmt.Sprintf("📥 プレイヤー **%s** が参加しました。", player))
 		return
 	}
 
-	// 2. 退出イベントのフック
 	if matches := regexPlayerLeft.FindStringSubmatch(line); len(matches) > 1 {
 		player := matches[1]
 		PlayersMutex.Lock()
@@ -266,7 +253,6 @@ func handleLogLineEvents(dg *discordgo.Session, line string) {
 			emptyStartTime = time.Now()
 			_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー数が0人になりました。1時間後に自動停止します。")
 
-			// 非同期で1時間後の自動停止監視タスクを実行
 			go func(startTime time.Time) {
 				time.Sleep(1 * time.Hour)
 				PlayersMutex.Lock()
@@ -285,7 +271,6 @@ func handleLogLineEvents(dg *discordgo.Session, line string) {
 	}
 }
 
-// 単発のSSHコマンドを安全に実行し、標準出力（stdout）のみを分離して取得する関数
 func executeRemoteCommandGetStdout(commandLine string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
@@ -299,7 +284,7 @@ func executeRemoteCommandGetStdout(commandLine string) (string, error) {
 
 	var stdoutBuf, stderrBuf strings.Builder
 	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf // 警告ノイズ（標準エラー）をオブジェクトレベルで完全分離
+	cmd.Stderr = &stderrBuf
 
 	err := cmd.Run()
 	if err != nil {
@@ -318,13 +303,11 @@ func isGCEInstanceRunning() bool {
 	return strings.TrimSpace(string(out)) == "RUNNING"
 }
 
-// 再接続時や起動時に単発で list コマンドを発行し、インメモリ人数を実態に合わせるロジック
 func syncOnlinePlayersDirect() {
 	_, err := executeRemoteCommandGetStdout("docker exec minecraft-bedrock send-command list")
 	if err != nil {
 		return
 	}
-	// send-command 自体は空を返すため、直後に docker logs から最終行付近を直接回収
 	logOut, err := executeRemoteCommandGetStdout("docker logs --tail=5 minecraft-bedrock")
 	if err != nil {
 		return
@@ -348,11 +331,20 @@ func syncOnlinePlayersDirect() {
 }
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
+	// 【不具合②対策】 スラッシュコマンドに加え、メッセージコンポーネント(ボタン)の判定空間を解放
+	if i.Type != discordgo.InteractionApplicationCommand && i.Type != discordgo.InteractionMessageComponent {
 		return
 	}
 
-	switch i.ApplicationCommandData().Name {
+	// 呼び出し元のコンテキストに応じてアクション名を透過的にマッピング
+	var actionName string
+	if i.Type == discordgo.InteractionApplicationCommand {
+		actionName = i.ApplicationCommandData().Name
+	} else if i.Type == discordgo.InteractionMessageComponent {
+		actionName = i.MessageComponentData().CustomID
+	}
+
+	switch actionName {
 	case "start":
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -396,7 +388,23 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}()
 
 	case "cmd":
-		minecraftCmd := i.ApplicationCommandData().Options[0].StringValue()
+		var minecraftCmd string
+		// スラッシュコマンドからの呼び出し時のみ、配列から引数を抽出
+		if i.Type == discordgo.InteractionApplicationCommand {
+			options := i.ApplicationCommandData().Options
+			if len(options) > 0 {
+				minecraftCmd = options[0].StringValue()
+			}
+		}
+
+		if minecraftCmd == "" {
+			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{Content: "エラー: コマンド引数が指定されていません。"},
+			})
+			return
+		}
+
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("コマンド `%s` を標準入力ストリームへインジェクション中...", minecraftCmd)},
@@ -404,7 +412,6 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		go func() {
 			startTime := time.Now()
 
-			// 1. 標準入力へコマンドをインジェクション（戻り値のStdout自体は空）
 			remoteCommand := fmt.Sprintf("docker exec minecraft-bedrock send-command \"%s\"", minecraftCmd)
 			_, err := executeRemoteCommandGetStdout(remoteCommand)
 			if err != nil {
@@ -412,10 +419,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				return
 			}
 
-			// 2. コマンド処理、ログ出力、およびストリーム経由のキャッシュ到達のための「2秒ディレイ」
 			time.Sleep(2 * time.Second)
 
-			// 3. 共有タイムバッファから、実行時刻以降に追記された生ログ行を全抽出して返却
 			capturedLogs := GlobalLogBuffer.ExtractSince(startTime)
 			if len(capturedLogs) == 0 {
 				_, _ = s.ChannelMessageSend(i.ChannelID, "【実行完了】コマンドは送信されましたが、直後のログ出力は空でした。")
