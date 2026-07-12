@@ -9,5 +9,31 @@ resource "google_compute_firewall" "allow_minecraft_bedrock" {
 
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["minecraft-server"]
-  direction     = "INGRESS"
+}
+
+resource "google_compute_firewall" "allow_minecraft_rcon_internal" {
+  name    = "allow-minecraft-rcon-internal"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["25575"]
+  }
+
+  # VPC内部のプライベートIPアドレス空間からの通信のみを許可
+  source_ranges = ["10.0.0.0/8"]
+  target_tags   = ["minecraft-server"]
+}
+
+resource "google_compute_firewall" "allow_ssh" {
+  name    = "allow-ssh-ingress"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["minecraft-server", "discord-bot"]
 }
