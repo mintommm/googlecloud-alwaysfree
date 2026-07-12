@@ -36,7 +36,7 @@ resource "google_compute_instance" "always_free" {
   name         = var.always_free_name
   machine_type = "e2-micro"
   zone         = var.always_free_zone
-  tags         = ["discord-bot"]
+  tags         = []
 
   boot_disk {
     initialize_params {
