@@ -1,16 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# 1. 内部ファイアウォール（iptables）の通信許可
-/sbin/iptables -C INPUT -p udp --dport 19132 -j ACCEPT 2>/dev/null || /sbin/iptables -A INPUT -p udp --dport 19132 -j ACCEPT
-/sbin/iptables -C INPUT -p tcp --dport 25575 -j ACCEPT 2>/dev/null || /sbin/iptables -A INPUT -p tcp --dport 25575 -j ACCEPT
+# 1. 内部ファイアウォール（iptables）の通信許可（先頭挿入 -I へ修正し恒久化）
+/sbin/iptables -C INPUT -p udp --dport 19132 -j ACCEPT 2>/dev/null || /sbin/iptables -I INPUT 1 -p udp --dport 19132 -j ACCEPT
+/sbin/iptables -C INPUT -p tcp --dport 25575 -j ACCEPT 2>/dev/null || /sbin/iptables -I INPUT 1 -p tcp --dport 25575 -j ACCEPT
 
 # 2. 同名コンテナが既に存在する場合はクリーンアップ
 CONTAINER_NAME="minecraft-bedrock"
 docker stop $CONTAINER_NAME || true
 docker rm $CONTAINER_NAME || true
 
-# 3. 名前付きボリュームを使用したコンテナの起動
+# 3. 名前付きボリュームを使用したコンテナの起動（Allowlistの有効化とユーザー指定）
 docker run -d \
     --name=$CONTAINER_NAME \
     --restart=always \
@@ -20,5 +20,6 @@ docker run -d \
     -e EULA=TRUE \
     -e RCON_ENABLED=true \
     -e RCON_PASSWORD=${rcon_password} \
-    -e ALLOW_LIST=false \
+    -e ALLOW_LIST=true \
+    -e ALLOW_LIST_USERS="MockPencil3834,DaftBurrito7340,superkurute,StaticEar839559" \
     itzg/minecraft-bedrock-server:latest
