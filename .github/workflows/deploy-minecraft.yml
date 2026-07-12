@@ -32,74 +32,65 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Get Always-Free External IP
-        id: gce-ip
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # シェルのエスケープバグを恒久対策するため、ランナーのローカル空間でコンフィグを安全に事前生成
+      - name: Generate Config Files Locally
         run: |
-          IP=$(gcloud compute instances describe always-free \
-            --zone=us-central1-a \
-            --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
-          echo "ip=$IP" >> $GITHUB_OUTPUT
+          mkdir -p tmp
 
-      - name: Deploy Binary via SSH
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ steps.gce-ip.outputs.ip }}
-          username: github-actions
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "apps/minecraft-controller/minecraft-controller"
-          target: "/home/github-actions/apps/minecraft-controller"
-          strip_components: 2
+          # 永続化環境変数ファイルの生成
+          cat << 'EOF' > tmp/.env
+          DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
+          DISCORD_GUILD_ID=${{ secrets.DISCORD_GUILD_ID }}
+          MC_ZONE=asia-northeast1-a
+          MC_INSTANCE_NAME=minecraft01
+          CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}
+          CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}
+          RCON_PASSWORD=${{ secrets.RCON_PASSWORD }}
+          DISCORD_NOTIFICATION_CHANNEL_ID=${{ secrets.DISCORD_NOTIFICATION_CHANNEL_ID }}
+          EOF
 
-      - name: Generate Configs and Restart User Service via SSH
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ steps.gce-ip.outputs.ip }}
-          username: github-actions
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
+          # systemd ユーザー空間サービス定義の生成 (%h により動的ユーザーのホームディレクトリを自動展開)
+          cat << 'EOF' > tmp/minecraft-controller.service
+          [Unit]
+          Description=Minecraft Controller Discord Bot
+          After=network.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=%h/apps/minecraft-controller
+          EnvironmentFile=%h/apps/minecraft-controller/.env
+          ExecStart=%h/apps/minecraft-controller/minecraft-controller
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=default.target
+          EOF
+
+      - name: Deploy Configs and Binary via IAP Tunneling
+        run: |
+          # 1. 動的ユーザー空間に対する常駐化特権（Linger）の最優先有効化およびディレクトリ自動生成
+          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --command="
+            loginctl enable-linger
+            mkdir -p ~/.config/systemd/user
+            mkdir -p ~/apps/minecraft-controller
+          "
+
+          # 2. コンポーネント群をIAP暗号化トンネル経由で安全に一括転送
+          gcloud compute scp apps/minecraft-controller/minecraft-controller always-free:~/apps/minecraft-controller/ --zone=us-central1-a --tunnel-through-iap
+          gcloud compute scp tmp/.env always-free:~/apps/minecraft-controller/ --zone=us-central1-a --tunnel-through-iap
+          gcloud compute scp tmp/minecraft-controller.service always-free:~/.config/systemd/user/ --zone=us-central1-a --tunnel-through-iap
+
+          # 3. リモートランタイムでの権限変更および systemd デーモンの再起動リロード
+          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --command='
             set -e
-
-            # 非インタラクティブSSHセッションで systemd --user を捕捉可能にするための定義
             export XDG_RUNTIME_DIR=/run/user/$(id -u)
-
-            # 1. ユーザー空間のディレクトリ群を自動生成（自所有権のため Permission denied は発生しない）
-            mkdir -p /home/github-actions/.config/systemd/user
-            mkdir -p /home/github-actions/apps/minecraft-controller
-
-            # 2. 環境変数ファイルの動的生成
-            cat << 'EOF' > /home/github-actions/apps/minecraft-controller/.env
-            DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
-            DISCORD_GUILD_ID=${{ secrets.DISCORD_GUILD_ID }}
-            MC_ZONE=asia-northeast1-a
-            MC_INSTANCE_NAME=minecraft01
-            CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}
-            CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}
-            CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}
-            RCON_PASSWORD=${{ secrets.RCON_PASSWORD }}
-            DISCORD_NOTIFICATION_CHANNEL_ID=${{ secrets.DISCORD_NOTIFICATION_CHANNEL_ID }}
-            EOF
-
-            chmod 600 /home/github-actions/apps/minecraft-controller/.env
-
-            # 3. ユーザーサービス定義ファイルの動的生成
-            cat << 'EOF' > /home/github-actions/.config/systemd/user/minecraft-controller.service
-            [Unit]
-            Description=Minecraft Controller Discord Bot
-            After=network.target
-
-            [Service]
-            Type=simple
-            WorkingDirectory=/home/github-actions/apps/minecraft-controller
-            EnvironmentFile=/home/github-actions/apps/minecraft-controller/.env
-            ExecStart=/home/github-actions/apps/minecraft-controller/minecraft-controller
-            Restart=always
-            RestartSec=5
-
-            [Install]
-            WantedBy=default.target
-            EOF
-
-            # 4. ユーザー特権でのサービス有効化および再起動
+            chmod 600 ~/apps/minecraft-controller/.env
             systemctl --user daemon-reload
             systemctl --user enable minecraft-controller.service
             systemctl --user restart minecraft-controller.service
+          '
