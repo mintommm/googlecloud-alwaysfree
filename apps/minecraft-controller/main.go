@@ -77,7 +77,7 @@ func main() {
 
 	log.Println("Botが起動しました。Ctrl+Cで終了します。")
 
-	// 1.分単位のRCONポーリング監視タスクをバックグラウンドで開始
+	// 分単位のRCONポーリング監視タスクをバックグラウンドで開始
 	go startPollingTicker(dg)
 
 	sc := make(chan os.Signal, 1)
@@ -224,7 +224,7 @@ func handleCmd(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
-		return {
+		return
 	}
 
 	options := i.ApplicationCommandData().Options
@@ -302,7 +302,7 @@ func executeStartSequence(s *discordgo.Session, i *discordgo.InteractionCreate) 
 	api, err := cloudflare.NewWithAPIToken(CFAPIToken)
 	if err == nil {
 		_, err = api.UpdateDNSRecord(ctx, cloudflare.ResourceIdentifier(CFZoneID), cloudflare.UpdateDNSRecordParams{
-			ID:      "minecraft_record_id_placeholder", // 該当レコードのID
+			ID:      "minecraft_record_id_placeholder",
 			Type:    "A",
 			Name:    CFRecordName,
 			Content: extIP,
@@ -330,16 +330,13 @@ func executeStartSequence(s *discordgo.Session, i *discordgo.InteractionCreate) 
 	finalContent := fmt.Sprintf("✅ **マインクラフトサーバーの起動が完了しました**\n🌐 ドメイン: `%s`\n⏱️ 総起動時間: `%.1f` 秒\n\nシステムは正常に常駐監視下に移行しました。", CFRecordName, elapsed)
 	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &finalContent})
 
-	// パネルの再送信
 	sendPanel(s, i)
 }
 
 func executeStopSequence(s *discordgo.Session, i *discordgo.InteractionCreate, force bool) {
 	if !force {
-		// オンラインプレイヤーの残存チェック
 		playersStr, err := executeRCON("list")
 		if err == nil && !strings.Contains(playersStr, "There are 0/") {
-			// プレイヤーが残っている場合は警告
 			content := fmt.Sprintf("⚠️ **警告: プレイヤーがまだサーバーに滞在しています。**\n%s\n本当に停止する場合は以下の「強制停止」を押してください。", playersStr)
 			component := discordgo.ActionsRow{
 				Components: []discordgo.MessageComponent{
@@ -384,7 +381,7 @@ func executeStopSequence(s *discordgo.Session, i *discordgo.InteractionCreate, f
 		time.Sleep(5 * time.Second)
 	}
 
-	state.isTimerActive = false // タイマーリセット
+	state.isTimerActive = false
 	finalContent := "✅ **マインクラフトサーバーは正常にシャットダウンされ、インスタンスは TERMINATED 状態になりました。**"
 	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &finalContent})
 
@@ -394,17 +391,13 @@ func executeStopSequence(s *discordgo.Session, i *discordgo.InteractionCreate, f
 func startPollingTicker(dg *discordgo.Session) {
 	ticker := time.NewTicker(1 * time.Minute)
 	for range ticker.C {
-		// RCON経由でプレイヤー一覧を取得
 		listResp, err := executeRCON("list")
 		if err != nil {
-			// サーバーが停止している場合は処理をスキップ
 			continue
 		}
 
-		// 1. 入退室のリアルタイム監視ロジック
 		handlePlayerJoinLeave(dg, listResp)
 
-		// 2. プレイヤー0人時の自動停止タイマー判定ロジック
 		if strings.Contains(listResp, "There are 0/") {
 			if !state.isTimerActive {
 				state.isTimerActive = true
@@ -416,7 +409,6 @@ func startPollingTicker(dg *discordgo.Session) {
 					msg := "🛑 **自動シャットダウン判定:** プレイヤー0名の状態が1時間継続したため、サーバーの自動停止処理を実行します。"
 					dg.ChannelMessageSend(NotificationChannel, msg)
 
-					// 停止シーケンスを非同期で実行
 					ctx := context.Background()
 					computeService, _ := compute.NewService(ctx)
 					computeService.Instances.Stop(ProjectID, Zone, InstanceName).Context(ctx).Do()
@@ -424,7 +416,6 @@ func startPollingTicker(dg *discordgo.Session) {
 				}
 			}
 		} else {
-			// プレイヤーが1人以上存在する場合
 			if state.isTimerActive {
 				state.isTimerActive = false
 				msg := "🔄 **通知:** プレイヤーのログインを検知したため、自動シャットダウンタイマーを解除しました。"
@@ -435,7 +426,6 @@ func startPollingTicker(dg *discordgo.Session) {
 }
 
 func handlePlayerJoinLeave(dg *discordgo.Session, listResp string) {
-	// 応答のパース（例: "There are 2/20 players online: player1, player2"）
 	parts := strings.Split(listResp, ":")
 	currentPlayers := make(map[string]bool)
 	if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
@@ -448,7 +438,6 @@ func handlePlayerJoinLeave(dg *discordgo.Session, listResp string) {
 		}
 	}
 
-	// 入室チェック
 	for name := range currentPlayers {
 		if !state.lastPlayers[name] {
 			msg := fmt.Sprintf("📥 **[入室]** `%s` がサーバーに参加しました。", name)
@@ -456,7 +445,6 @@ func handlePlayerJoinLeave(dg *discordgo.Session, listResp string) {
 		}
 	}
 
-	// 退出チェック
 	for name := range state.lastPlayers {
 		if !currentPlayers[name] {
 			msg := fmt.Sprintf("📤 **[退出]** `%s` がサーバーから退出しました。", name)
