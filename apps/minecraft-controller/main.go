@@ -1,21 +1,20 @@
 package main
 
 import (
-	"encoding/json"
+	"bufio"
+	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 )
 
 var (
@@ -26,49 +25,45 @@ var (
 	NotificationChannel = os.Getenv("DISCORD_NOTIFICATION_CHANNEL_ID")
 )
 
-// BDS WebSocketプロトコルのJSON構造体定義
-type WSMessage struct {
-	Header WSHeader        `json:"header"`
-	Body   json.RawMessage `json:"body"`
+// 共有ログバッファの構造体（直近のログ行をスライディング保持）
+type LogLine struct {
+	Timestamp time.Time
+	Message   string
 }
 
-type WSHeader struct {
-	Version        int    `json:"version"`
-	RequestID      string `json:"requestId"`
-	MessageType    string `json:"messageType"`
-	MessagePurpose string `json:"messagePurpose"`
+type SafeLogBuffer struct {
+	mu    sync.Mutex
+	lines []LogLine
 }
 
-type WSCommandBody struct {
-	Version     int      `json:"version"`
-	CommandLine string   `json:"commandLine"`
-	Origin      WSOrigin `json:"origin"`
-}
-
-type WSOrigin struct {
-	Type string `json:"type"`
-}
-
-type WSEventBody struct {
-	EventName string `json:"eventName"`
-}
-
-// 接続管理および非同期レスポンス同期用のグローバルステート
+// グローバルステート管理
 var (
-	wsConn      *websocket.Conn
-	wsMutex     sync.Mutex
-	responseMap sync.Map // key: requestId (string), value: chan string
-	isTimerActive  = false
-	emptyStartTime time.Time
+	GlobalLogBuffer SafeLogBuffer
+	CurrentPlayers  = 0
+	PlayersMutex    sync.Mutex
+	isTimerActive   = false
+	emptyStartTime  time.Time
+	streamCancel    context.CancelFunc
+	streamMu        sync.Mutex
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
+// ログ解析用の正規表現
+var (
+	regexPlayerJoin = regexp.MustCompile(`Player connected:\s+([^,]+)`)
+	regexPlayerLeft = regexp.MustCompile(`Player disconnected:\s+([^,]+)`)
+	regexListCount  = regexp.MustCompile(`There are (\d+)/\d+ players online`)
+)
 
 func main() {
 	if Token == "" || GuildID == "" {
 		log.Fatal("DISCORD_TOKEN and DISCORD_GUILD_ID must be set")
+	}
+
+	if Zone == "" {
+		Zone = "asia-northeast1-a"
+	}
+	if InstanceName == "" {
+		InstanceName = "minecraft01"
 	}
 
 	dg, err := discordgo.New("Bot " + Token)
@@ -78,6 +73,8 @@ func main() {
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("Bot logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
+		// 起動時にGCEがRUNNINGであれば、自動的にログストリーミングを開始
+		go manageStreamLifecycle(dg)
 	})
 	dg.AddHandler(interactionCreate)
 
@@ -85,9 +82,6 @@ func main() {
 		log.Fatalf("Error opening Discord connection: %v", err)
 	}
 	defer dg.Close()
-
-	// 内部ポート8000番でのWebSocketサーバー起動（非同期実行）
-	go startWebSocketServer(dg)
 
 	commands := []*discordgo.ApplicationCommand{
 		{Name: "start", Description: "マインクラフトサーバーを起動します"},
@@ -112,219 +106,245 @@ func main() {
 		log.Fatalf("Could not register application commands: %v", err)
 	}
 
-	log.Println("Bot system context is active. Listening on network configurations...")
+	log.Println("Bot system context is active. Managing logs and terminal lifecycles...")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
 
+	stopLogStream()
 	for _, cmd := range registeredCommands {
 		_ = dg.ApplicationCommandDelete(dg.State.User.ID, GuildID, cmd.ID)
 	}
 }
 
-// BDSからの接続を待ち受けるハンドラ
-func startWebSocketServer(dg *discordgo.Session) {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Printf("WebSocket upgrade failed: %v", err)
-			return
+// 共有バッファへのログ行の追記と、30秒が経過した古い行の切り捨て処理
+func (b *SafeLogBuffer) Append(msg string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	b.lines = append(b.lines, LogLine{Timestamp: now, Message: msg})
+
+	// 30秒以上前のログをスライディングクリア
+	cutoff := now.Add(-30 * time.Second)
+	idx := 0
+	for i, line := range b.lines {
+		if line.Timestamp.After(cutoff) {
+			idx = i
+			break
 		}
-
-		wsMutex.Lock()
-		wsConn = conn
-		wsMutex.Unlock()
-		log.Println("【接続確立】Minecraft BDS とのWebSocket永続接続が完了しました。")
-
-		// 接続成功直後に入退出イベントの購読要求（サブスクリプション）を送信
-		subscribeEvent("PlayerJoined")
-		subscribeEvent("PlayerLeft")
-
-		// 起動ポーリングを即時充足させるための通知シグナルをDiscordに送信可能
-		if NotificationChannel != "" {
-			_, _ = dg.ChannelMessageSend(NotificationChannel, "【完了】マインクラフトサーバーの起動を確認し、制御バスを確立しました。")
-		}
-
-		// メッセージ受信ループの稼働
-		for {
-			_, message, err := conn.ReadMessage()
-			if err != nil {
-				log.Printf("WebSocket read connection closed: %v", err)
-				wsMutex.Lock()
-				wsConn = nil
-				wsMutex.Unlock()
-				break
-			}
-			handleIncomingWSMessage(dg, message)
-		}
-	})
-
-	log.Println("Starting native WebSocket listener on 0.0.0.0:8000...")
-	if err := http.ListenAndServe(":8000", nil); err != nil {
-		log.Fatalf("Failed to start HTTP server for WS: %v", err)
+	}
+	if idx > 0 {
+		b.lines = b.lines[idx:]
 	}
 }
 
-// 受信したJSONオブジェクトのパースとルーティング
-func handleIncomingWSMessage(dg *discordgo.Session, message []byte) {
-	var msg WSMessage
-	if err := json.Unmarshal(message, &msg); err != nil {
+// 指定したタイムスタンプ以降にバッファに書き込まれた生ログを一括抽出
+func (b *SafeLogBuffer) ExtractSince(since time.Time) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var result []string
+	for _, line := range b.lines {
+		if line.Timestamp.After(since) || line.Timestamp.Equal(since) {
+			result = append(result, line.Message)
+		}
+	}
+	return result
+}
+
+// 常時ストリーミングの開始・リトライライフサイクル管理
+func manageStreamLifecycle(dg *discordgo.Session) {
+	streamMu.Lock()
+	if streamCancel != nil {
+		streamMu.Unlock()
+		return // すでに稼働中の場合は重複起動を防止
+	}
+	var ctx context.Context
+	ctx, streamCancel = context.WithCancel(context.Background())
+	streamMu.Unlock()
+
+	defer func() {
+		streamMu.Lock()
+		streamCancel = nil
+		streamMu.Unlock()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if isGCEInstanceRunning() {
+				// 再接続時の論理要件：単発コマンドで人数を再同期
+				syncOnlinePlayersDirect()
+
+				log.Println("【ストリーム開始】IAPキープアライブ付きでstdout常時接続を確立します。")
+				err := startLogStreamProcess(ctx, dg)
+				if err != nil {
+					log.Printf("ストリームプロセスが切断されました: %v。5秒後に再接続を試みます。", err)
+				}
+			}
+			time.Sleep(5 * time.Second) // インスタンス停止中または切断時のバックオフ待機
+		}
+	}
+}
+
+func stopLogStream() {
+	streamMu.Lock()
+	if streamCancel != nil {
+		streamCancel()
+		streamCancel = nil
+		log.Println("【ストリーム停止】常時ログストリーミングを明示的に終了しました。")
+	}
+	streamMu.Unlock()
+}
+
+// SSHキープアライブオプションを強制インジェクションした永続ストリーミング実行処理
+func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
+	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
+		"--zone="+Zone,
+		"--tunnel-through-iap",
+		"--quiet",
+		"--ssh-flag=-o ServerAliveInterval=15",
+		"--ssh-flag=-o ServerAliveCountMax=3",
+		"--command=docker logs -f --tail=0 minecraft-bedrock",
+	)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	// 警告ノイズが混入する標準エラー出力は、ログ回収を汚さないよう完全に破棄または分離
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		GlobalLogBuffer.Append(line) // 共有メモリバッファへ格納
+		handleLogLineEvents(dg, line)
+	}
+
+	return cmd.Wait()
+}
+
+// ストリーム行のテキストパースとイベントフック
+func handleLogLineEvents(dg *discordgo.Session, line string) {
+	if NotificationChannel == "" {
 		return
 	}
 
-	// 1. コマンド実行結果（requestId）の同期処理へのマッピング
-	if ch, exists := responseMap.Load(msg.Header.RequestID); exists {
-		if responseChan, ok := ch.(chan string); ok {
-			responseChan <- string(message)
-			return
-		}
+	if strings.Contains(line, "Server started.") {
+		_, _ = dg.ChannelMessageSend(NotificationChannel, "【完了】マインクラフトサーバープログラムの完全起動を確認しました。ログイン可能です。")
+		return
 	}
 
-	// 2. イベントプッシュ（入退室通知）の処理
-	if msg.Header.MessageType == "event" {
-		var eventBody map[string]interface{}
-		if err := json.Unmarshal(msg.Body, &eventBody); err != nil {
-			return
+	// 1. 参加イベントのフック
+	if matches := regexPlayerJoin.FindStringSubmatch(line); len(matches) > 1 {
+		player := matches[1]
+		PlayersMutex.Lock()
+		CurrentPlayers++
+		isTimerActive = false // 人数が増えたためタイマーは強制解除
+		PlayersMutex.Unlock()
+		_, _ = dg.ChannelMessageSend(NotificationChannel, fmt.Sprintf("📥 プレイヤー **%s** が参加しました。", player))
+		return
+	}
+
+	// 2. 退出イベントのフック
+	if matches := regexPlayerLeft.FindStringSubmatch(line); len(matches) > 1 {
+		player := matches[1]
+		PlayersMutex.Lock()
+		CurrentPlayers--
+		if CurrentPlayers < 0 {
+			CurrentPlayers = 0
 		}
 
-		eventName := eventBody["eventName"].(string)
-		properties := eventBody["properties"].(map[string]interface{})
-		player := properties["player"].(string)
+		if CurrentPlayers == 0 && !isTimerActive {
+			isTimerActive = true
+			emptyStartTime = time.Now()
+			_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー数が0人になりました。1時間後に自動停止します。")
 
-		if NotificationChannel == "" {
-			return
-		}
-
-		if eventName == "PlayerJoined" {
-			_, _ = dg.ChannelMessageSend(NotificationChannel, fmt.Sprintf("📥 プレイヤー **%s** がサーバーに参加しました。", player))
-			// 自動停止タイマーが動いていれば解除
-			if isTimerActive {
-				isTimerActive = false
-				_, _ = dg.ChannelMessageSend(NotificationChannel, "自動停止タイマーを解除しました。")
-			}
-		} else if eventName == "PlayerLeft" {
-			_, _ = dg.ChannelMessageSend(NotificationChannel, fmt.Sprintf("📤 プレイヤー **%s** がサーバーから退出しました。", player))
-
-			// 人数チェックを行い、0人であればタイマーを開始
-			go func() {
-				time.Sleep(5 * time.Second) // 切断処理の完了猶予
-				if count, err := getOnlinePlayerCountWS(); err == nil && count == 0 {
-					isTimerActive = true
-					emptyStartTime = time.Now()
-					_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー数が0人になりました。1時間後に自動停止します。")
-
-					// 1時間後の自動停止監視タスク
-					go func(startTime time.Time) {
-						time.Sleep(1 * time.Hour)
-						if isTimerActive && emptyStartTime.Equal(startTime) {
-							_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー0人の状態が1時間継続したため、自動シャットダウンを実行します。")
-							exec.Command("gcloud", "compute", "instances", "stop", InstanceName, "--zone="+Zone, "--quiet").Run()
-							isTimerActive = false
-						}
-					}(emptyStartTime)
+			// 非同期で1時間後の自動停止監視タスクを実行
+			go func(startTime time.Time) {
+				time.Sleep(1 * time.Hour)
+				PlayersMutex.Lock()
+				if isTimerActive && emptyStartTime.Equal(startTime) {
+					_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー0人の状態が1時間継続したため、自動シャットダウンを実行します。")
+					_ = exec.Command("gcloud", "compute", "instances", "stop", InstanceName, "--zone="+Zone, "--quiet").Run()
+					isTimerActive = false
+					stopLogStream()
 				}
-			}()
+				PlayersMutex.Unlock()
+			}(emptyStartTime)
 		}
+		PlayersMutex.Unlock()
+		_, _ = dg.ChannelMessageSend(NotificationChannel, fmt.Sprintf("📤 プレイヤー **%s** が退出しました。", player))
+		return
 	}
 }
 
-// イベント購読用のJSONコマンド送信関数
-func subscribeEvent(eventName string) {
-	reqID := uuid.New().String()
-	body, _ := json.Marshal(WSEventBody{EventName: eventName})
-	msg := WSMessage{
-		Header: WSHeader{
-			Version:        1,
-			RequestID:      reqID,
-			MessageType:    "commandRequest",
-			MessagePurpose: "subscribe",
-		},
-		Body: body,
+// 単発のSSHコマンドを安全に実行し、標準出力（stdout）のみを分離して取得する関数
+func executeRemoteCommandGetStdout(commandLine string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
+		"--zone="+Zone,
+		"--tunnel-through-iap",
+		"--quiet",
+		"--command="+commandLine,
+	)
+
+	var stdoutBuf, stderrBuf strings.Builder
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf // 警告ノイズ（標準エラー）をオブジェクトレベルで完全分離
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("error: %v, stderr: %s", err, stderrBuf.String())
 	}
-	sendWSJSON(msg)
+	return stdoutBuf.String(), nil
 }
 
-func sendWSJSON(msg interface{}) bool {
-	wsMutex.Lock()
-	defer wsMutex.Unlock()
-	if wsConn == nil {
+func isGCEInstanceRunning() bool {
+	cmd := exec.Command("gcloud", "compute", "instances", "describe", InstanceName,
+		"--zone="+Zone, "--format=get(status)")
+	out, err := cmd.Output()
+	if err != nil {
 		return false
 	}
-	err := wsConn.WriteJSON(msg)
-	return err == nil
+	return strings.TrimSpace(string(out)) == "RUNNING"
 }
 
-// WebSocketを介した命令の確実な同期実行ロジック
-func sendCommandAndWait(commandLine string) (string, error) {
-	wsMutex.Lock()
-	hasConn := wsConn != nil
-	wsMutex.Unlock()
-
-	if !hasConn {
-		return "", fmt.Errorf("MinecraftサーバーとのWebSocket制御コネクションが確立されていません")
-	}
-
-	reqID := uuid.New().String()
-	cmdBody, _ := json.Marshal(WSCommandBody{
-		Version:     1,
-		CommandLine: commandLine,
-		Origin:      WSOrigin{Type: "player"},
-	})
-
-	msg := WSMessage{
-		Header: WSHeader{
-			Version:        1,
-			RequestID:      reqID,
-			MessageType:    "commandRequest",
-			MessagePurpose: "commandRequest",
-		},
-		Body: cmdBody,
-	}
-
-	// 応答用チャネルの生成と同期用Mapへの登録
-	ch := make(chan string, 1)
-	responseMap.Store(reqID, ch)
-	defer responseMap.Delete(reqID)
-
-	if !sendWSJSON(msg) {
-		return "", fmt.Errorf("WebSocketデータの送信に失敗しました")
-	}
-
-	// タイムアウトを設けて応答を同期待機
-	select {
-	case res := <-ch:
-		return res, nil
-	case <-time.After(5 * time.Second):
-		return "", fmt.Errorf("サーバーからの応答タイムアウト（5秒）")
-	}
-}
-
-func getOnlinePlayerCountWS() (int, error) {
-	res, err := sendCommandAndWait("list")
+// 再接続時や起動時に単発で list コマンドを発行し、インメモリ人数を実態に合わせるロジック
+func syncOnlinePlayersDirect() {
+	out, err := executeRemoteCommandGetStdout("docker exec minecraft-bedrock send-command list")
 	if err != nil {
-		return 0, err
+		return
 	}
-
-	// 戻り値JSON内のbody/statusMessageに配置された "There are X/Y players online" をパース
-	var msg WSMessage
-	_ = json.Unmarshal([]byte(res), &msg)
-
-	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(msg.Body, &bodyMap); err != nil {
-		return 0, err
-	}
-
-	statusMessage, ok := bodyMap["statusMessage"].(string)
-	if !ok {
-		return 0, fmt.Errorf("invalid status message format")
-	}
-
-	var current, max int
-	_, err = fmt.Sscanf(statusMessage, "There are %d/%d players online", &current, &max)
+	// send-command 自体は空を返すため、直後に docker logs から最終行付近を直接回収
+	logOut, err := executeRemoteCommandGetStdout("docker logs --tail=5 minecraft-bedrock")
 	if err != nil {
-		return 0, err
+		return
 	}
-	return current, nil
+
+	lines := strings.Split(logOut, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if matches := regexListCount.FindStringSubmatch(lines[i]); len(matches) > 1 {
+			var count int
+			_, _ = fmt.Sscanf(matches[1], "%d", &count)
+			PlayersMutex.Lock()
+			CurrentPlayers = count
+			if count > 0 {
+				isTimerActive = false
+			}
+			PlayersMutex.Unlock()
+			log.Printf("【同期完了】インメモリオンラインプレイヤー数を実態（%d人）に補正しました。", count)
+			return
+		}
+	}
 }
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -344,7 +364,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("GCE起動失敗: %v", err))
 				return
 			}
-			_, _ = s.ChannelMessageSend(i.ChannelID, "GCEインスタンスの起動に成功しました。[処理中] マインクラフトプログラムからの接続バス(WebSocket)確立を待機しています...")
+			_, _ = s.ChannelMessageSend(i.ChannelID, "GCEインスタンス起動成功。【処理中】ストリームパイプラインを結合し、プログラムの完全起動を待機しています...")
+			go manageStreamLifecycle(s)
 		}()
 
 	case "stop":
@@ -353,58 +374,59 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			Data: &discordgo.InteractionResponseData{Content: "サーバーのシャットダウン処理を実行します..."},
 		})
 		go func() {
-			// 安全に停止させるため、事前にコンテナの停止猶予を持たせる目的等で直接GCE stopを実行
-			exec.Command("gcloud", "compute", "instances", "stop", InstanceName, "--zone="+Zone, "--quiet").Run()
+			stopLogStream()
+			_ = exec.Command("gcloud", "compute", "instances", "stop", InstanceName, "--zone="+Zone, "--quiet").Run()
 			_, _ = s.ChannelMessageSend(i.ChannelID, "マインクラフトサーバーは正常に停止し、インスタンスは TERMINATED 状態になりました。")
 		}()
 
 	case "status":
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Content: "現在のインフラおよびサーバー状態を同期中..."},
+			Data: &discordgo.InteractionResponseData{Content: "現在のインフラおよびメモリステートを確認中..."},
 		})
 		go func() {
-			cmdStatus := exec.Command("gcloud", "compute", "instances", "describe", InstanceName, "--zone="+Zone, "--format=get(status)")
-			statusOutput, err := cmdStatus.Output()
-			if err != nil {
-				_, _ = s.ChannelMessageSend(i.ChannelID, "ステータス取得失敗")
+			if !isGCEInstanceRunning() {
+				_, _ = s.ChannelMessageSend(i.ChannelID, "GCEインスタンス状態: TERMINATED (サーバープログラムは現在停止しています)")
 				return
 			}
-			gceStatus := strings.TrimSpace(string(statusOutput))
-
-			if gceStatus != "RUNNING" {
-				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("GCEインスタンス状態: %s (サーバープログラムは現在停止しています)", gceStatus))
-				return
-			}
-
-			count, err := getOnlinePlayerCountWS()
-			if err != nil {
-				_, _ = s.ChannelMessageSend(i.ChannelID, "GCEインスタンス状態: RUNNING (WebSocketバス接続確立待ち、または応答なし)")
-				return
-			}
-			_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("GCEインスタンス状態: RUNNING\nオンラインプレイヤー数: %d人", count))
+			PlayersMutex.Lock()
+			count := CurrentPlayers
+			PlayersMutex.Unlock()
+			_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("GCEインスタンス状態: RUNNING\nオンラインプレイヤー数 (メモリ同期): %d人", count))
 		}()
 
 	case "cmd":
 		minecraftCmd := i.ApplicationCommandData().Options[0].StringValue()
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("WebSocketバス経由でコマンド `%s` を同期送信中...", minecraftCmd)},
+			Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("コマンド `%s` を標準入力ストリームへインジェクション中...", minecraftCmd)},
 		})
 		go func() {
-			res, err := sendCommandAndWait(minecraftCmd)
+			startTime := time.Now()
+
+			// 1. 標準入力へコマンドをインジェクション（戻り値のStdout自体は空）
+			remoteCommand := fmt.Sprintf("docker exec minecraft-bedrock send-command \"%s\"", minecraftCmd)
+			_, err := executeRemoteCommandGetStdout(remoteCommand)
 			if err != nil {
-				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("コマンド送信失敗: %v", err))
+				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("コマンドのインジェクションに失敗しました: %v", err))
 				return
 			}
 
-			var msg WSMessage
-			_ = json.Unmarshal([]byte(res), &msg)
-			var bodyMap map[string]interface{}
-			_ = json.Unmarshal(msg.Body, &bodyMap)
-			statusMessage, _ := bodyMap["statusMessage"].(string)
+			// 2. 確定要件：コマンド処理、ログ出力、およびストリーム経由のキャッシュ到達のための「2秒ディレイ」
+			time.Sleep(2 * time.Second)
 
-			_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("【実行結果】\n```\n%s\n```", strings.TrimSpace(statusMessage)))
+			// 3. 共有タイムバッファから、実行時刻以降に追記された生ログ行を全抽出して返却
+			capturedLogs := GlobalLogBuffer.ExtractSince(startTime)
+			if len(capturedLogs) == 0 {
+				_, _ = s.ChannelMessageSend(i.ChannelID, "【実行完了】コマンドは送信されましたが、直後のログ出力は空でした。")
+				return
+			}
+
+			logBlock := strings.Join(capturedLogs, "\n")
+			if len(logBlock) > 1900 {
+				logBlock = logBlock[:1900] + "\n...(出力が大きいため省略されました)"
+			}
+			_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("【実行直後のコンテナ出力】\n```\n%s\n```", logBlock))
 		}()
 	}
 }
