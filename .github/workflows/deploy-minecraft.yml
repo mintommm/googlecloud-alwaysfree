@@ -39,6 +39,7 @@ jobs:
         run: |
           mkdir -p tmp
 
+          # 固定絶対パス用の環境変数ファイルを生成
           cat << 'EOF' > tmp/.env
           DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
           DISCORD_GUILD_ID=${{ secrets.DISCORD_GUILD_ID }}
@@ -51,6 +52,7 @@ jobs:
           DISCORD_NOTIFICATION_CHANNEL_ID=${{ secrets.DISCORD_NOTIFICATION_CHANNEL_ID }}
           EOF
 
+          # システム全体で管理するシステムサービス定義ファイルを生成（絶対パス固定）
           cat << 'EOF' > tmp/minecraft-controller.service
           [Unit]
           Description=Minecraft Controller Discord Bot
@@ -58,46 +60,50 @@ jobs:
 
           [Service]
           Type=simple
-          WorkingDirectory=%h/apps/minecraft-controller
-          EnvironmentFile=%h/apps/minecraft-controller/.env
-          ExecStart=%h/apps/minecraft-controller/minecraft-controller
+          User=root
+          WorkingDirectory=/opt/minecraft-controller
+          EnvironmentFile=/opt/minecraft-controller/.env
+          ExecStart=/opt/minecraft-controller/minecraft-controller
           Restart=always
           RestartSec=5
 
           [Install]
-          WantedBy=default.target
+          WantedBy=multi-user.target
           EOF
 
       - name: Deploy Configs and Binary via IAP Tunneling
         run: |
-          # 1. 動的ユーザー名とUIDを特定し、systemdユーザーインスタンスを明示的に強制起動
-          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --command='
+          # 1. 鍵生成の対話を防止するため --quiet を付与し、一時配置用ディレクトリを作成
+          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --quiet --command="
             set -e
-            CURRENT_USER=$(whoami)
-            CURRENT_UID=$(id -u)
+            mkdir -p ~/tmp_deploy
+            sudo mkdir -p /opt/minecraft-controller
+          "
 
-            # 永続化の有効化
-            sudo loginctl enable-linger "$CURRENT_USER"
+          # 2. 一時配置ディレクトリへファイルを安全に一括転送
+          gcloud compute scp apps/minecraft-controller/minecraft-controller always-free:~/tmp_deploy/ --zone=us-central1-a --tunnel-through-iap --quiet
+          gcloud compute scp tmp/.env always-free:~/tmp_deploy/ --zone=us-central1-a --tunnel-through-iap --quiet
+          gcloud compute scp tmp/minecraft-controller.service always-free:~/tmp_deploy/ --zone=us-central1-a --tunnel-through-iap --quiet
 
-            # 非ログインセッション下でユーザーマネージャーインスタンスを強制起動（バスの生成）
-            sudo systemctl start user@"$CURRENT_UID"
-
-            # ディレクトリの事前作成
-            mkdir -p ~/.config/systemd/user
-            mkdir -p ~/apps/minecraft-controller
-          '
-
-          # 2. 生成されたバス空間を対象とした一括ファイル転送
-          gcloud compute scp apps/minecraft-controller/minecraft-controller always-free:~/apps/minecraft-controller/ --zone=us-central1-a --tunnel-through-iap
-          gcloud compute scp tmp/.env always-free:~/apps/minecraft-controller/ --zone=us-central1-a --tunnel-through-iap
-          gcloud compute scp tmp/minecraft-controller.service always-free:~/.config/systemd/user/ --zone=us-central1-a --tunnel-through-iap
-
-          # 3. 確立された環境変数を明示的に指定してサービスを制御
-          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --command='
+          # 3. root特権を用いてシステム領域へファイルを配置し、システムサービスとして起動
+          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --quiet --command='
             set -e
-            export XDG_RUNTIME_DIR=/run/user/$(id -u)
-            chmod 600 ~/apps/minecraft-controller/.env
-            systemctl --user daemon-reload
-            systemctl --user enable minecraft-controller.service
-            systemctl --user restart minecraft-controller.service
+
+            # バイナリと環境変数ファイルの移動および権限適正化
+            sudo mv ~/tmp_deploy/minecraft-controller /opt/minecraft-controller/
+            sudo mv ~/tmp_deploy/.env /opt/minecraft-controller/
+            sudo chmod 700 /opt/minecraft-controller/minecraft-controller
+            sudo chmod 600 /opt/minecraft-controller/.env
+
+            # システムサービス定義ファイルの配置
+            sudo mv ~/tmp_deploy/minecraft-controller.service /etc/systemd/system/
+            sudo chmod 644 /etc/systemd/system/minecraft-controller.service
+
+            # 一時ディレクトリのクリーンアップ
+            rm -rf ~/tmp_deploy
+
+            # システムレイヤー（特権）でのデーモンリロードおよび再起動
+            sudo systemctl daemon-reload
+            sudo systemctl enable minecraft-controller.service
+            sudo systemctl restart minecraft-controller.service
           '
