@@ -59,24 +59,18 @@ resource "google_compute_instance" "always_free" {
   }
 
   metadata = {
+    # GCE標準のエージェント機構による安全なSSH鍵・ユーザー自動構成
+    ssh-keys = "github-actions:${var.ssh_public_key}"
+
+    # ユーザー生成を確認した後に非同期で常駐化（Linger）のみを有効化するスクリプト
     startup-script = <<-EOT
       #!/bin/bash
-      set -euo pipefail
-
-      # ユーザーが存在しない場合のみ作成
-      if ! id -u github-actions >/dev/null 2>&1; then
-        useradd -m -s /bin/bash github-actions
-      fi
-
-      # systemd --user の永続化（Linger）を有効化
-      loginctl enable-linger github-actions
-
-      # SSH公開鍵の配置と権限適正化
-      mkdir -p /home/github-actions/.ssh
-      chmod 700 /home/github-actions/.ssh
-      echo "${var.ssh_public_key}" > /home/github-actions/.ssh/authorized_keys
-      chmod 600 /home/github-actions/.ssh/authorized_keys
-      chown -R github-actions:github-actions /home/github-actions/.ssh
+      (
+        while ! id -u github-actions >/dev/null 2>&1; do
+          sleep 2
+        done
+        loginctl enable-linger github-actions
+      ) &
     EOT
   }
 
