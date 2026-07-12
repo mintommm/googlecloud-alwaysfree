@@ -21,6 +21,6 @@ docker run -d \
     -e RCON_ENABLED=true \
     -e RCON_PASSWORD=${rcon_password} \
     -e ALLOW_LIST=true \
-    -e ALLOW_LIST_USERS="MockPencil3834,DaftBurrito7340,superkurute,StaticEar839559" \
+    -e ALLOW_LIST_USERS="${allow_list_users}" \
     -e LEVEL_NAME="Kiseki" \
     itzg/minecraft-bedrock-server:latest

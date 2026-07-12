@@ -32,3 +32,8 @@ variable "rcon_password" {
   type      = string
   sensitive = true
 }
+
+variable "allow_list_users" {
+  type      = string
+  sensitive = true
+}

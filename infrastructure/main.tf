@@ -21,7 +21,8 @@ resource "google_compute_instance" "minecraft01" {
 
   metadata = {
     startup-script = templatefile("${path.module}/scripts/minecraft-startup.sh", {
-      rcon_password = var.rcon_password
+      rcon_password    = var.rcon_password
+      allow_list_users = var.allow_list_users
     })
   }
 
@@ -40,9 +41,8 @@ resource "google_compute_instance" "always_free" {
 
   boot_disk {
     initialize_params {
-      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
-      size  = 30
-      type  = "pd-standard"
+      size = 30
+      type = "pd-standard"
     }
   }
 
