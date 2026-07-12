@@ -24,11 +24,3 @@ docker run -d \
     -e ALLOW_LIST_USERS="${allow_list_users}" \
     -e LEVEL_NAME="Kiseki" \
     itzg/minecraft-bedrock-server:latest
-
-# BDSプログラムの完全起動およびログ出力を待機
-until docker logs minecraft-bedrock 2>&1 | grep -q "Server started."; do
-  sleep 3
-done
-
-# 起動確定後、Botの内部IPおよびポート8000に対してWebSocketハンドシェイクを実行
-docker exec minecraft-bedrock send-command "connect ${bot_internal_ip}:8000"
