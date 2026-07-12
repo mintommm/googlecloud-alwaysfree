@@ -1,11 +1,3 @@
-Secret Managerの導入に伴い、認証情報のローカルディスクへの平文保存を完全に排除し、安全にローカル検証（`terraform plan`/`apply`）を行うための運用手順を統合した最新の `README.md` である。
-
-プロジェクトのルート直下の `README.md` を以下の内容で更新する。
-
----
-
-### `README.md`（最新版）
-
 ```markdown
 ---
 project: discord-integrated-minecraft-server
@@ -20,74 +12,25 @@ last_updated: 2026-07-12
 ## 概要
 本プロジェクトは、Google Cloud Platform（GCP）上に構築されたマインクラフト（Bedrock版）ゲームサーバー、およびそれを制御するDiscord Bot環境を、Terraformによるインフラのコード化（IaC）とGitHub ActionsによるCI/CDパイプラインを用いて自動管理するマルチモジュール（モノレポ）リポジトリである。
 
-## 単一の正（SSOT）の定義
+## 単一の正（SSOT）の定義と機密情報管理
 本環境におけるすべての「あるべき姿」は、本GitHubリポジトリにコミットされたコードを正（Single Source of Truth）とする。
-- GCP上の物理状態（State）はGCSバケット（`tf-mintommm-alwaysfree-gce`）で排他ロック管理されるが、構成定義の決定権はリポジトリのコードに帰属する。
-- 実行環境（Cloud Shell等）への個別カスタマイズは排除し、ツール類は都度インストールを行う。
 - リモートリポジトリへの秘密情報の流出を完全に防ぐため、ローカル環境での認証情報の平文保存（`terraform.tfvars` 等への記述）は禁止とする。
+- 認証情報はGCPの「Secret Manager」を利用して一元管理し、Always Free（無料枠）の範囲内で安全に参照を行う。
 
-## ディレクトリ構造
-```text
-.
-├── .github/
-│   └── workflows/
-│       ├── deploy-infra.yml          # インフラ自動適用（Terraform）
-│       └── deploy-minecraft.yml      # 制御Bot自動適用（Go）
-├── .gitignore                        # 各種除外定義（*.tfvars, Goバイナリ等）
-├── README.md                         # 本ファイル
-├── go.work                           # Go Workspace（モノレポ統括設定）
-├── infrastructure/                   # インフラ構成定義（Terraform）
-│   ├── backend.tf
-│   ├── firewall.tf
-│   ├── main.tf
-│   ├── provider.tf
-│   ├── variables.tf
-│   └── scripts/
-│       └── minecraft-startup.sh      # GCEホスト側スタートアップスクリプト
-├── shared/                           # 共通モジュール領域
-│   └── go.mod
-└── apps/                             # アプリケーションコード
-    └── minecraft-controller/         # マイクラ制御Bot（Goモジュール）
-        ├── go.mod
-        ├── go.sum
-        └── main.go
+## コードから非自明な暗黙の制約（AIエージェントへの指示）
 
-```
+### 1. 変数 `rcon_password` と GCP シークレットのマッピング
+Terraform定義（`variables.tf`）における `rcon_password` に注入すべき本番パスワードは、GCP Secret Manager上のシークレット名 **`minecraft-rcon-password`** に格納されている。ローカル検証および手動適用時は必ずここから動的に取得して注入すること。
 
-## システム仕様
-
-### 1. 制御用メインインスタンス（always-free）
-
-* **マシンタイプ**: `e2-micro` / `us-central1-a` ゾーン / 30GB 標準永続ディスク（GCP無料枠対象）
-* **認証権限**: `381098905316-compute@developer.gserviceaccount.com`（アクセススコープ: `https://www.googleapis.com/auth/cloud-platform`）を保持。インプレース更新による破壊は禁止。
-
-### 2. ゲームサーバー用インスタンス（minecraft01）
-
-* **マシンタイプ**: `e2-highcpu-2` / `asia-northeast1-a` ゾーン / 10GB バランス永続ディスク
-* **実行環境**: Container-Optimized OS（COS）によるDockerコンテナ運用
-* **データ定義**: メタデータ（`startup-script`）をインプレース更新可能な構造で保持。環境変数 `LEVEL_NAME="Kiseki"` を指定し、既存のワールドデータを永続ボリューム（`minecraft-data`）経由でロード。
-* **アクセス制御**: `ALLOW_LIST=true` を適用し、指定された特定の4ユーザー（`MockPencil3834`, `DaftBurrito7340`, `superkurute`, `StaticEar839559`）のみ接続を許可。
-
-### 3. アプリケーション（minecraft-controller）
-
-* **開発言語**: Go言語 (Golang v1.22)
-* **主要機能**:
-* Discordのインタラクション（スラッシュコマンド `/panel` およびボタンUI）によるGCEインスタンスの起動・停止制御。
-* インスタンス起動検知時のポーリング制御、および外部IPの動的取得。
-* Cloudflare APIを介したAレコードの自動更新（DDNS機能、UDP透過のための `Proxied=false` 設定）。
-
-
+### 2. `minecraft01` インスタンスの「実質的な破壊厳禁」制約
+`google_compute_instance.minecraft01` は、HCLコード上 `prevent_destroy` は未設定であるが、運用上の要請（動的外部IPの維持およびコンテナ環境の安定）により、**リプレイス（破壊・再生成）を伴う変更の適用は原則禁止**とする。
+メタデータ変更等は必ず `metadata` ブロックのマップ構造（`startup-script` キー）を使用し、`update in-place` で処理させること。差分判定のバグ等でリプレイスが計画された場合は、Stateの再インポート（`terraform state rm` / `import`）によりインプレース構造へ強制適合させること。
 
 ---
 
-## 開発・運用手順
+## 開発・運用手順（Cloud Shell等での実行）
 
-### 認証情報の管理について（GCP Secret Manager）
-
-RCONパスワードなどの機密情報は、GCPの「Secret Manager」を利用して一元管理し、Always Free（無料枠）の範囲内で安全に参照を行う。
-
-#### 1. シークレットの初回登録・更新（Cloud Shell等での実行）
-
+### 1. シークレットの初回登録・更新
 ```bash
 # シークレットの作成（未作成の場合のみ）
 gcloud secrets create minecraft-rcon-password --replication-policy="automatic"
@@ -97,9 +40,9 @@ echo -n "実際のRCONパスワード文字列" | gcloud secrets versions add mi
 
 ```
 
-#### 2. ローカル検証（terraform plan / apply）の実行手順
+### 2. ローカル検証および適用手順
 
-ファイルにパスワードを永続化させず、コマンド実行時のみ環境変数を動的に注入して整合性を検証する。`infrastructure/` ディレクトリに移動した上で、以下のコマンドを実行する。
+ファイルにパスワードを永続化させず、コマンド実行時のみ環境変数を動的に注入して整合性を検証する。必ず `infrastructure/` ディレクトリに移動した上で実行すること。
 
 ```bash
 # 実行計画の確認（Plan）
