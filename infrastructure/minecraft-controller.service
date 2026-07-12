@@ -6,11 +6,8 @@ After=network.target
 Type=simple
 User=github-actions
 WorkingDirectory=/home/github-actions/apps/minecraft-controller
-ExecStart=/home/github-actions/apps/minecraft-controller/minecraft-controller
-
-# デプロイ時に自動生成される環境変数ファイルを指定
 EnvironmentFile=/home/github-actions/apps/minecraft-controller/.env
-
+ExecStart=/home/github-actions/apps/minecraft-controller/minecraft-controller
 Restart=always
 RestartSec=5
 
