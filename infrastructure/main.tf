@@ -60,7 +60,6 @@ resource "google_compute_instance" "always_free" {
   }
 
   metadata = {
-    # GCPベストプラクティス：OS Loginをプロジェクト統合モードで強制有効化
     enable-oslogin = "TRUE"
   }
 
