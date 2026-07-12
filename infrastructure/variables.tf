@@ -28,7 +28,6 @@ variable "always_free_name" {
   default = "always-free"
 }
 
-# パスワード用の秘密変数（デフォルト値は未定義とする）
 variable "rcon_password" {
   type      = string
   sensitive = true

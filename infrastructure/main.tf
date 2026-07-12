@@ -1,10 +1,8 @@
-# ゲームサーバー用インスタンス（オンデマンド稼働）
 resource "google_compute_instance" "minecraft01" {
   name         = var.instance_name
   machine_type = "e2-highcpu-2"
   zone         = var.zone
-
-  tags = ["minecraft-server"]
+  tags         = ["minecraft-server"]
 
   boot_disk {
     initialize_params {
@@ -17,14 +15,16 @@ resource "google_compute_instance" "minecraft01" {
   network_interface {
     network = "default"
     access_config {
-      // エフェメラル外部IP（起動ごとに動的割り当て）
+      // エフェメラル外部IP（動的割り当て）
     }
   }
 
-  # テンプレート関数を使用してRCONパスワードをスクリプトへ注入
-  metadata_startup_script = templatefile("${path.module}/scripts/minecraft-startup.sh", {
-    rcon_password = var.rcon_password
-  })
+  # 再生成を回避し、インプレース更新にするため metadata ブロック形式へ修正
+  metadata = {
+    startup-script = templatefile("${path.module}/scripts/minecraft-startup.sh", {
+      rcon_password = var.rcon_password
+    })
+  }
 
   lifecycle {
     ignore_changes = [
@@ -33,13 +33,11 @@ resource "google_compute_instance" "minecraft01" {
   }
 }
 
-# 制御用メインインスタンス（Always Free対象・常時稼働）
 resource "google_compute_instance" "always_free" {
   name         = var.always_free_name
   machine_type = "e2-micro"
   zone         = var.always_free_zone
-
-  tags = []
+  tags         = []
 
   boot_disk {
     initialize_params {
@@ -55,7 +53,6 @@ resource "google_compute_instance" "always_free" {
     }
   }
 
-  # インポート時のサービスアカウントおよびAPIアクセススコープの剥奪を防ぐための定義
   service_account {
     email  = "381098905316-compute@developer.gserviceaccount.com"
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]

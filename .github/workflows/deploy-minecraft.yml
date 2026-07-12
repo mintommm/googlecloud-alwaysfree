@@ -12,37 +12,38 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.22'
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
 
-    # GOWORK=off を指定してワークスペースの干渉を完全に排除し、単一モジュールとしてビルド
-    - name: Build Binary
-      run: |
-        cd apps/minecraft-controller
-        GOWORK=off GOOS=linux GOARCH=amd64 go build -o minecraft-controller .
+      - name: Download Dependencies
+        run: |
+          go work use -r .
+          go mod download -json github.com/bwmarrin/discordgo google.golang.org/api/compute/v1 google.golang.org/api/option
 
-    # 実行バイナリをGCEインスタンスにSSH転送
-    - name: Deploy to GCE via SSH
-      uses: appleboy/scp-action@master
-      with:
-        host: ${{ secrets.INSTANCE_IP }}
-        username: github-actions
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        source: "apps/minecraft-controller/minecraft-controller"
-        target: "/home/github-actions/apps/minecraft-controller"
-        strip_components: 2
+      - name: Build Binary
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o apps/minecraft-controller/minecraft-controller ./apps/minecraft-controller
 
-    # インスタンス側でBotサービスを再起動して最新バイナリを適用
-    - name: Restart Service via SSH
-      uses: appleboy/ssh-action@master
-      with:
-        host: ${{ secrets.INSTANCE_IP }}
-        username: github-actions
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        script: |
-          sudo systemctl restart minecraft-controller.service
+      - name: Deploy to GCE via SSH
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.INSTANCE_IP }}
+          username: github-actions
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "apps/minecraft-controller/minecraft-controller"
+          target: "/home/github-actions/apps/minecraft-controller"
+          strip_components: 2
+
+      - name: Restart Service via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.INSTANCE_IP }}
+          username: github-actions
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            sudo systemctl restart minecraft-controller.service
