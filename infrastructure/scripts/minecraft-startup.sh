@@ -18,13 +18,17 @@ docker rm $CONTAINER_NAME || true
 docker run --rm -v minecraft-data:/data google/cloud-sdk:alpine sh -c '
 if [ ! -d "/data/worlds/kiseki" ]; then
     echo "ワールドデータが見つかりません。GCS から自動リストアを試行します..."
-    gcloud storage cp gs://$(gcloud config get-value project)-minecraft-backup/world-data-kiseki.tar.xz /tmp/world.tar.xz --quiet || true
-    if [ -f "/tmp/world.tar.xz" ]; then
-        mkdir -p /data/worlds
-        cd /data/worlds
-        tar -xf /tmp/world.tar.xz
-        rm -f /tmp/world.tar.xz
-        echo "GCS からの自動リストアが完了しました。"
+    BUCKET="gs://$(gcloud config get-value project)-minecraft-backup"
+    gcloud storage cp $BUCKET/world-data-kiseki.tar.gz /tmp/world.tar.gz --quiet || true
+    if [ -f "/tmp/world.tar.gz" ]; then
+        mkdir -p /data/worlds && cd /data/worlds && tar -xzf /tmp/world.tar.gz && rm -f /tmp/world.tar.gz
+        echo "GCS からの自動リストア (.tar.gz) が完了しました。"
+    else
+        gcloud storage cp $BUCKET/world-data-kiseki.tar.xz /tmp/world.tar.xz --quiet || true
+        if [ -f "/tmp/world.tar.xz" ]; then
+            mkdir -p /data/worlds && cd /data/worlds && tar -xf /tmp/world.tar.xz && rm -f /tmp/world.tar.xz
+            echo "GCS からの自動リストア (.tar.xz) が完了しました。"
+        fi
     fi
 fi
 ' || true

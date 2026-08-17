@@ -611,7 +611,7 @@ func executeOnlineBackupFlow() error {
 
 	time.Sleep(3 * time.Second)
 
-	// 2. GCS バックアップスクリプト実行 (XZ 高速並列圧縮 + GCS アップロード)
+	// 2. GCS バックアップスクリプト実行 (gzip 高速直接ストリーム + GCS アップロード)
 	backupScript := fmt.Sprintf(`sudo docker run --rm -i \
 		-v minecraft-data:/data:ro \
 		google/cloud-sdk:alpine sh -s << 'EOF'
@@ -621,9 +621,7 @@ TARGET_DIR="kiseki"
 if [ ! -d "kiseki" ] && [ -d "Kiseki" ]; then
     TARGET_DIR="Kiseki"
 fi
-tar -cf - "$TARGET_DIR" | xz -1 -T0 -c > /tmp/world-data-kiseki.tar.xz
-gcloud storage cp /tmp/world-data-kiseki.tar.xz gs://%s-minecraft-backup/world-data-kiseki.tar.xz --quiet
-rm -f /tmp/world-data-kiseki.tar.xz
+tar -czf - "$TARGET_DIR" | gcloud storage cp - gs://%s-minecraft-backup/world-data-kiseki.tar.gz --quiet
 EOF`, GCPProjectID)
 
 	_, err = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
@@ -635,7 +633,7 @@ EOF`, GCPProjectID)
 		return fmt.Errorf("GCS バックアップ失敗: %w", err)
 	}
 
-	log.Println("【バックアップ完了】gs://" + GCPProjectID + "-minecraft-backup/world-data-kiseki.tar.xz へ安全に退避しました")
+	log.Println("【バックアップ完了】gs://" + GCPProjectID + "-minecraft-backup/world-data-kiseki.tar.gz へ安全に退避しました")
 	return nil
 }
 
@@ -643,7 +641,7 @@ func executeOfflineBackupSequence(dg *discordgo.Session) {
 	_, _ = executeRemoteCommandWithTimeout("sudo docker stop -t 10 minecraft-bedrock", 60*time.Second)
 	stopLogStream()
 
-	// 停止時最終バックアップ (XZ 高速並列圧縮)
+	// 停止時最終バックアップ (gzip 高速直接ストリーム)
 	backupScript := fmt.Sprintf(`sudo docker run --rm -i \
 		-v minecraft-data:/data:ro \
 		google/cloud-sdk:alpine sh -s << 'EOF'
@@ -653,9 +651,7 @@ TARGET_DIR="kiseki"
 if [ ! -d "kiseki" ] && [ -d "Kiseki" ]; then
     TARGET_DIR="Kiseki"
 fi
-tar -cf - "$TARGET_DIR" | xz -1 -T0 -c > /tmp/world-data-kiseki.tar.xz
-gcloud storage cp /tmp/world-data-kiseki.tar.xz gs://%s-minecraft-backup/world-data-kiseki.tar.xz --quiet
-rm -f /tmp/world-data-kiseki.tar.xz
+tar -czf - "$TARGET_DIR" | gcloud storage cp - gs://%s-minecraft-backup/world-data-kiseki.tar.gz --quiet
 EOF`, GCPProjectID)
 	_, _ = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
 
