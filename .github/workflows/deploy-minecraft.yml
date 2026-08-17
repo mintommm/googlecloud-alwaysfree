@@ -18,10 +18,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
+      - name: Set up Go with caching
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.5'
+          cache: true
 
       - name: Build Binary
         run: |
@@ -35,16 +36,11 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Install NumPy into gcloud active Python environment
+      - name: Prepare Single-shot Deployment Bundle
         run: |
-          GCLOUD_PYTHON=$(gcloud info --format="value(basic.python_location)")
-          $GCLOUD_PYTHON -m pip install --user --break-system-packages numpy
+          mkdir -p tmp/bundle
 
-      - name: Generate Config Files Locally
-        run: |
-          mkdir -p tmp
-
-          cat << 'EOF' > tmp/.env
+          cat << 'EOF' > tmp/bundle/.env
           DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
           DISCORD_GUILD_ID=${{ secrets.DISCORD_GUILD_ID }}
           MC_ZONE=asia-northeast1-a
@@ -52,11 +48,13 @@ jobs:
           CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}
           CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}
           CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}
-          RCON_PASSWORD=${{ secrets.RCON_PASSWORD }}
           DISCORD_NOTIFICATION_CHANNEL_ID=${{ secrets.DISCORD_NOTIFICATION_CHANNEL_ID }}
+          GCP_PROJECT_ID=mintommm-alwaysfree-gce
+          WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_PORT=80
           EOF
 
-          cat << 'EOF' > tmp/minecraft-controller.service
+          cat << 'EOF' > tmp/bundle/minecraft-controller.service
           [Unit]
           Description=Minecraft Controller Discord Bot
           After=network.target
@@ -74,31 +72,78 @@ jobs:
           WantedBy=multi-user.target
           EOF
 
-      - name: Deploy Configs and Binary via IAP Tunneling
-        run: |
-          gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --quiet --command="
-            set -e
-            mkdir -p ~/tmp_deploy
-            sudo mkdir -p /opt/minecraft-controller
-          "
+          if [ -n "${{ secrets.MINECRAFT_KRMTN_ORG_DEPLOY_KEY }}" ]; then
+            cat << 'EOF' > tmp/bundle/id_ed25519
+${{ secrets.MINECRAFT_KRMTN_ORG_DEPLOY_KEY }}
+EOF
+            chmod 600 tmp/bundle/id_ed25519
+          fi
 
-          gcloud compute scp apps/minecraft-controller/minecraft-controller always-free:~/tmp_deploy/ --zone=us-central1-a --tunnel-through-iap --quiet
-          gcloud compute scp tmp/.env always-free:~/tmp_deploy/ --zone=us-central1-a --tunnel-through-iap --quiet
-          gcloud compute scp tmp/minecraft-controller.service always-free:~/tmp_deploy/ --zone=us-central1-a --tunnel-through-iap --quiet
+          cp apps/minecraft-controller/minecraft-controller tmp/bundle/
+          tar -czf tmp/deploy_bundle.tar.gz -C tmp/bundle .
+
+      - name: Single-shot Deploy & Automated Healthcheck with Rollback
+        run: |
+          gcloud compute scp tmp/deploy_bundle.tar.gz always-free:~/deploy_bundle.tar.gz --zone=us-central1-a --tunnel-through-iap --quiet
 
           gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --quiet --command='
             set -e
-            sudo mv ~/tmp_deploy/minecraft-controller /opt/minecraft-controller/
-            sudo mv ~/tmp_deploy/.env /opt/minecraft-controller/
+            sudo mkdir -p /opt/minecraft-controller
+            mkdir -p ~/tmp_extract
+            tar -xzf ~/deploy_bundle.tar.gz -C ~/tmp_extract
+            rm -f ~/deploy_bundle.tar.gz
+
+            # 1. 旧バイナリの自動バックアップ (ロールバック用)
+            if [ -f /opt/minecraft-controller/minecraft-controller ]; then
+              sudo cp /opt/minecraft-controller/minecraft-controller /opt/minecraft-controller/minecraft-controller.old
+            fi
+
+            # 2. 新バイナリと設定の配置
+            sudo mv ~/tmp_extract/minecraft-controller /opt/minecraft-controller/
+            sudo mv ~/tmp_extract/.env /opt/minecraft-controller/
             sudo chmod 700 /opt/minecraft-controller/minecraft-controller
             sudo chmod 600 /opt/minecraft-controller/.env
 
-            sudo mv ~/tmp_deploy/minecraft-controller.service /etc/systemd/system/
+            # 3. Deploy Key 自動復元 & known_hosts 登録 & config-repo 確保
+            if [ -f ~/tmp_extract/id_ed25519 ]; then
+              sudo mkdir -p /root/.ssh
+              sudo mv ~/tmp_extract/id_ed25519 /root/.ssh/id_ed25519
+              sudo chmod 700 /root/.ssh
+              sudo chmod 600 /root/.ssh/id_ed25519
+              ssh-keyscan -t ed25519,rsa github.com | sudo tee -a /root/.ssh/known_hosts > /dev/null
+              sudo chmod 600 /root/.ssh/known_hosts
+            fi
+
+            sudo mkdir -p /opt/minecraft-controller/config-repo
+            if [ ! -d /opt/minecraft-controller/config-repo/.git ]; then
+              sudo git clone git@github.com:mintommm/minecraft-krmtn-org.git /opt/minecraft-controller/config-repo || true
+            fi
+            sudo chown -R root:root /opt/minecraft-controller/config-repo
+
+            # 4. systemd サービスファイルの配置
+            sudo mv ~/tmp_extract/minecraft-controller.service /etc/systemd/system/
             sudo chmod 644 /etc/systemd/system/minecraft-controller.service
+            rm -rf ~/tmp_extract
 
-            rm -rf ~/tmp_deploy
-
+            # 3. サービス再読み込みと再起動
             sudo systemctl daemon-reload
             sudo systemctl enable minecraft-controller.service
             sudo systemctl restart minecraft-controller.service
+
+            # 4. 自動ヘルスチェック (5秒待機後にアクティブ確認)
+            sleep 3
+            if sudo systemctl is-active --quiet minecraft-controller.service; then
+              echo "✅ Healthcheck PASSED: Service is active and running successfully."
+              if [ -f /opt/minecraft-controller/minecraft-controller.old ]; then
+                sudo rm -f /opt/minecraft-controller/minecraft-controller.old
+              fi
+            else
+              echo "❌ Healthcheck FAILED: Service failed to start! Initiating automated rollback..."
+              if [ -f /opt/minecraft-controller/minecraft-controller.old ]; then
+                sudo mv /opt/minecraft-controller/minecraft-controller.old /opt/minecraft-controller/minecraft-controller
+                sudo systemctl restart minecraft-controller.service
+                echo "⚠️ Rollback completed: Restored previous working binary."
+              fi
+              exit 1
+            fi
           '

@@ -18,7 +18,6 @@ jobs:
     name: 'Terraform'
     runs-on: 'ubuntu-latest'
     env:
-      TF_VAR_rcon_password: ${{ secrets.RCON_PASSWORD }}
       TF_VAR_allow_list_users: ${{ secrets.MC_ALLOW_LIST_USERS }}
     steps:
       - name: 'Checkout'

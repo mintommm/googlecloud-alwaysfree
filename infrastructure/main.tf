@@ -21,12 +21,12 @@ resource "google_compute_instance" "minecraft01" {
 
   metadata = {
     startup-script = templatefile("${path.module}/scripts/minecraft-startup.sh", {
-      rcon_password    = var.rcon_password
       allow_list_users = var.allow_list_users
     })
   }
 
   lifecycle {
+    prevent_destroy = true
     ignore_changes = [
       boot_disk[0].initialize_params[0].image,
     ]
@@ -69,4 +69,26 @@ resource "google_compute_instance" "always_free" {
       boot_disk[0].initialize_params[0].image,
     ]
   }
+}
+
+resource "google_storage_bucket" "minecraft_backup" {
+  name          = "${var.project_id}-minecraft-backup"
+  location      = "US-CENTRAL1"
+  storage_class = "STANDARD"
+
+  versioning {
+    enabled = true
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      num_newer_versions = 5
+      with_state         = "ARCHIVED"
+    }
+  }
+
+  uniform_bucket_level_access = true
 }

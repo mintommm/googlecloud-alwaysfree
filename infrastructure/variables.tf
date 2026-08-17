@@ -28,11 +28,6 @@ variable "always_free_name" {
   default = "always-free"
 }
 
-variable "rcon_password" {
-  type      = string
-  sensitive = true
-}
-
 variable "allow_list_users" {
   type      = string
   sensitive = true

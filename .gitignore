@@ -1,5 +1,6 @@
 # Terraform 内部キャッシュ
 .terraform/
+**/.terraform/
 
 # ローカル実行時のStateファイル（GCSバックエンドがあるため不要）
 *.tfstate
