@@ -89,16 +89,19 @@ jobs:
           cp apps/minecraft-controller/minecraft-controller tmp/bundle/
           tar -czf tmp/deploy_bundle.tar.gz -C tmp/bundle .
 
+      - name: Upload Deployment Bundle to GCS
+        run: |
+          gcloud storage cp tmp/deploy_bundle.tar.gz gs://mintommm-alwaysfree-gce-minecraft-backup/deploy/deploy_bundle.tar.gz --quiet
+
       - name: Single-shot Deploy & Automated Healthcheck with Rollback
         run: |
-          gcloud compute scp tmp/deploy_bundle.tar.gz always-free:~/deploy_bundle.tar.gz --zone=us-central1-a --tunnel-through-iap --quiet
-
           gcloud compute ssh always-free --zone=us-central1-a --tunnel-through-iap --quiet --command='
             set -e
             sudo mkdir -p /opt/minecraft-controller
             mkdir -p ~/tmp_extract
-            tar -xzf ~/deploy_bundle.tar.gz -C ~/tmp_extract
-            rm -f ~/deploy_bundle.tar.gz
+            gcloud storage cp gs://mintommm-alwaysfree-gce-minecraft-backup/deploy/deploy_bundle.tar.gz ~/tmp_extract/deploy_bundle.tar.gz --quiet
+            tar -xzf ~/tmp_extract/deploy_bundle.tar.gz -C ~/tmp_extract
+            rm -f ~/tmp_extract/deploy_bundle.tar.gz
 
             # 1. 旧バイナリの自動バックアップ (ロールバック用)
             if [ -f /opt/minecraft-controller/minecraft-controller ]; then
