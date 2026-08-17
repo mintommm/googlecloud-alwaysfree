@@ -30,3 +30,17 @@ run "verify_webhook_firewall_rule" {
     error_message = "Webhook ポート 8080 がファイアウォールで許可されていません"
   }
 }
+
+run "verify_deploy_temp_bucket_config" {
+  command = plan
+
+  assert {
+    condition     = google_storage_bucket.deploy_temp.name == "test-project-12345-deploy-temp"
+    error_message = "デプロイ一時バケット名が仕様と一致しません"
+  }
+
+  assert {
+    condition     = tolist(google_storage_bucket.deploy_temp.lifecycle_rule[0].condition)[0].age == 1
+    error_message = "デプロイ一時バケットのライフサイクルルールが 1 日に設定されていません"
+  }
+}

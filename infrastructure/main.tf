@@ -93,3 +93,20 @@ resource "google_storage_bucket" "minecraft_backup" {
 
   uniform_bucket_level_access = true
 }
+
+resource "google_storage_bucket" "deploy_temp" {
+  name                        = "${var.project_id}-deploy-temp"
+  location                    = "US-CENTRAL1"
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+  force_destroy               = true
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      age = 1
+    }
+  }
+}

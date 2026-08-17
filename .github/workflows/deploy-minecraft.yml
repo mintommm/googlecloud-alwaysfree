@@ -91,7 +91,7 @@ jobs:
 
       - name: Upload Deployment Bundle to GCS
         run: |
-          gcloud storage cp tmp/deploy_bundle.tar.gz gs://mintommm-alwaysfree-gce-minecraft-backup/deploy/deploy_bundle.tar.gz --quiet
+          gcloud storage cp tmp/deploy_bundle.tar.gz gs://mintommm-alwaysfree-gce-deploy-temp/deploy_bundle.tar.gz --quiet
 
       - name: Single-shot Deploy & Automated Healthcheck with Rollback
         run: |
@@ -99,7 +99,7 @@ jobs:
             set -e
             sudo mkdir -p /opt/minecraft-controller
             mkdir -p ~/tmp_extract
-            gcloud storage cp gs://mintommm-alwaysfree-gce-minecraft-backup/deploy/deploy_bundle.tar.gz ~/tmp_extract/deploy_bundle.tar.gz --quiet
+            gcloud storage cp gs://mintommm-alwaysfree-gce-deploy-temp/deploy_bundle.tar.gz ~/tmp_extract/deploy_bundle.tar.gz --quiet
             tar -xzf ~/tmp_extract/deploy_bundle.tar.gz -C ~/tmp_extract
             rm -f ~/tmp_extract/deploy_bundle.tar.gz
 
