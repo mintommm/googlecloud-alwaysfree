@@ -46,6 +46,7 @@ jobs:
       - name: Prepare Single-shot Deployment Bundle
         env:
           DEPLOY_KEY: ${{ secrets.MINECRAFT_KRMTN_ORG_DEPLOY_KEY }}
+          BOT_SSH_KEY: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p tmp/bundle
 
@@ -86,6 +87,11 @@ jobs:
             chmod 600 tmp/bundle/id_ed25519
           fi
 
+          if [ -n "$BOT_SSH_KEY" ]; then
+            printf '%s\n' "$BOT_SSH_KEY" > tmp/bundle/bot_id_ed25519
+            chmod 600 tmp/bundle/bot_id_ed25519
+          fi
+
           cp apps/minecraft-controller/minecraft-controller tmp/bundle/
           tar -czf tmp/deploy_bundle.tar.gz -C tmp/bundle .
 
@@ -114,7 +120,7 @@ jobs:
             sudo chmod 700 /opt/minecraft-controller/minecraft-controller
             sudo chmod 600 /opt/minecraft-controller/.env
 
-            # 3. Deploy Key 自動復元 & known_hosts 登録 & config-repo 確保
+            # 3. Deploy Key & Bot SSH Key 自動復元 & known_hosts 登録 & config-repo 確保
             if [ -f ~/tmp_extract/id_ed25519 ]; then
               sudo mkdir -p /root/.ssh
               sudo mv ~/tmp_extract/id_ed25519 /root/.ssh/id_ed25519
@@ -122,6 +128,13 @@ jobs:
               sudo chmod 600 /root/.ssh/id_ed25519
               ssh-keyscan -t ed25519,rsa github.com | sudo tee -a /root/.ssh/known_hosts > /dev/null
               sudo chmod 600 /root/.ssh/known_hosts
+            fi
+
+            if [ -f ~/tmp_extract/bot_id_ed25519 ]; then
+              sudo mkdir -p /root/.ssh
+              sudo mv ~/tmp_extract/bot_id_ed25519 /root/.ssh/bot_id_ed25519
+              sudo chmod 700 /root/.ssh
+              sudo chmod 600 /root/.ssh/bot_id_ed25519
             fi
 
             sudo mkdir -p /opt/minecraft-controller/config-repo

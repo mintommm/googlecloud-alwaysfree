@@ -32,3 +32,9 @@ variable "allow_list_users" {
   type      = string
   sensitive = true
 }
+
+variable "bot_ssh_public_key" {
+  type        = string
+  description = "Public SSH key for always-free bot to connect directly to minecraft01"
+  default     = ""
+}

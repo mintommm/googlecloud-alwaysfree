@@ -21,6 +21,8 @@ resource "google_compute_instance" "minecraft01" {
   }
 
   metadata = {
+    enable-oslogin = "FALSE"
+    ssh-keys       = var.bot_ssh_public_key != "" ? "root:${var.bot_ssh_public_key}" : ""
     startup-script = templatefile("${path.module}/scripts/minecraft-startup.sh", {
       allow_list_users = var.allow_list_users
     })

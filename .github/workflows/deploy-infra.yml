@@ -19,6 +19,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     env:
       TF_VAR_allow_list_users: ${{ secrets.MC_ALLOW_LIST_USERS }}
+      TF_VAR_bot_ssh_public_key: ${{ secrets.BOT_SSH_PUBLIC_KEY }}
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@v4'

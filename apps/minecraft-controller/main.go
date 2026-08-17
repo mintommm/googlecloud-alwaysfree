@@ -468,15 +468,34 @@ func stopLogStream() {
 	streamMu.Unlock()
 }
 
+const (
+	MinecraftInternalHost = "minecraft01.asia-northeast1-a.c.mintommm-alwaysfree-gce.internal"
+	BotSSHKeyPath         = "/root/.ssh/bot_id_ed25519"
+)
+
 func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
-	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
-		"--zone="+Zone,
-		"--internal-ip",
-		"--quiet",
-		"--ssh-flag=-o ServerAliveInterval=15",
-		"--ssh-flag=-o ServerAliveCountMax=3",
-		"--command=docker logs -f --tail=20 minecraft-bedrock",
-	)
+	var cmd *exec.Cmd
+	if _, err := os.Stat(BotSSHKeyPath); err == nil {
+		cmd = exec.CommandContext(ctx, "ssh",
+			"-i", BotSSHKeyPath,
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "ServerAliveInterval=15",
+			"-o", "ServerAliveCountMax=3",
+			"-o", "ConnectTimeout=5",
+			"root@"+MinecraftInternalHost,
+			"docker logs -f --tail=20 minecraft-bedrock",
+		)
+	} else {
+		cmd = exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
+			"--zone="+Zone,
+			"--internal-ip",
+			"--quiet",
+			"--ssh-flag=-o ServerAliveInterval=15",
+			"--ssh-flag=-o ServerAliveCountMax=3",
+			"--command=docker logs -f --tail=20 minecraft-bedrock",
+		)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -654,12 +673,24 @@ func executeRemoteCommandWithTimeout(commandLine string, timeout time.Duration) 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
-		"--zone="+Zone,
-		"--internal-ip",
-		"--quiet",
-		"--command="+commandLine,
-	)
+	var cmd *exec.Cmd
+	if _, err := os.Stat(BotSSHKeyPath); err == nil {
+		cmd = exec.CommandContext(ctx, "ssh",
+			"-i", BotSSHKeyPath,
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "ConnectTimeout=5",
+			"root@"+MinecraftInternalHost,
+			commandLine,
+		)
+	} else {
+		cmd = exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
+			"--zone="+Zone,
+			"--internal-ip",
+			"--quiet",
+			"--command="+commandLine,
+		)
+	}
 
 	var stdoutBuf, stderrBuf strings.Builder
 	cmd.Stdout = &stdoutBuf
