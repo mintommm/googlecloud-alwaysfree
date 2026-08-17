@@ -37,3 +37,23 @@ resource "google_compute_firewall" "allow_webhook" {
   source_ranges = ["0.0.0.0/0"]
   direction     = "INGRESS"
 }
+
+resource "google_compute_firewall" "allow_internal" {
+  name    = "allow-internal-vpc"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["0-65535"]
+  }
+  allow {
+    protocol = "udp"
+    ports    = ["0-65535"]
+  }
+  allow {
+    protocol = "icmp"
+  }
+
+  source_ranges = ["10.128.0.0/9"]
+  direction     = "INGRESS"
+}

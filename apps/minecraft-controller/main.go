@@ -471,7 +471,7 @@ func stopLogStream() {
 func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
 		"--zone="+Zone,
-		"--tunnel-through-iap",
+		"--internal-ip",
 		"--quiet",
 		"--ssh-flag=-o ServerAliveInterval=15",
 		"--ssh-flag=-o ServerAliveCountMax=3",
@@ -650,7 +650,7 @@ func executeRemoteCommandWithTimeout(commandLine string, timeout time.Duration) 
 
 	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
 		"--zone="+Zone,
-		"--tunnel-through-iap",
+		"--internal-ip",
 		"--quiet",
 		"--command="+commandLine,
 	)
