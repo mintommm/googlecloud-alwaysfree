@@ -58,7 +58,7 @@ run "verify_minecraft01_ssh_metadata" {
   }
 
   assert {
-    condition     = google_compute_instance.minecraft01.metadata["ssh-keys"] == "root:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockBotKey"
+    condition     = google_compute_instance.minecraft01.metadata["ssh-keys"] == "bot:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockBotKey"
     error_message = "minecraft01 の ssh-keys に公開鍵が設定されていません"
   }
 }

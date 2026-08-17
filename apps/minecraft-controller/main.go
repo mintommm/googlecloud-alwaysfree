@@ -483,8 +483,8 @@ func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 			"-o", "ServerAliveInterval=15",
 			"-o", "ServerAliveCountMax=3",
 			"-o", "ConnectTimeout=5",
-			"root@"+MinecraftInternalHost,
-			"docker logs -f --tail=20 minecraft-bedrock",
+			"bot@"+MinecraftInternalHost,
+			"sudo docker logs -f --tail=20 minecraft-bedrock",
 		)
 	} else {
 		cmd = exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
@@ -493,7 +493,7 @@ func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 			"--quiet",
 			"--ssh-flag=-o ServerAliveInterval=15",
 			"--ssh-flag=-o ServerAliveCountMax=3",
-			"--command=docker logs -f --tail=20 minecraft-bedrock",
+			"--command=sudo docker logs -f --tail=20 minecraft-bedrock",
 		)
 	}
 
@@ -604,7 +604,7 @@ func stopBackupTicker() {
 
 func executeOnlineBackupFlow() error {
 	// 1. save hold
-	_, err := executeRemoteCommandWithTimeout("docker exec minecraft-bedrock send-command \"save hold\"", 60*time.Second)
+	_, err := executeRemoteCommandWithTimeout("sudo docker exec minecraft-bedrock send-command \"save hold\"", 60*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to send save hold: %w", err)
 	}
@@ -612,7 +612,7 @@ func executeOnlineBackupFlow() error {
 	time.Sleep(3 * time.Second)
 
 	// 2. GCS バックアップスクリプト実行 (XZ 高速並列圧縮 + GCS アップロード)
-	backupScript := fmt.Sprintf(`docker run --rm -i \
+	backupScript := fmt.Sprintf(`sudo docker run --rm -i \
 		-v minecraft-data:/data:ro \
 		google/cloud-sdk:alpine sh -s << 'EOF'
 set -e
@@ -629,7 +629,7 @@ EOF`, GCPProjectID)
 	_, err = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
 
 	// 3. save resume
-	_, _ = executeRemoteCommandWithTimeout("docker exec minecraft-bedrock send-command \"save resume\"", 60*time.Second)
+	_, _ = executeRemoteCommandWithTimeout("sudo docker exec minecraft-bedrock send-command \"save resume\"", 60*time.Second)
 
 	if err != nil {
 		return fmt.Errorf("GCS バックアップ失敗: %w", err)
@@ -640,11 +640,11 @@ EOF`, GCPProjectID)
 }
 
 func executeOfflineBackupSequence(dg *discordgo.Session) {
-	_, _ = executeRemoteCommandWithTimeout("docker stop -t 10 minecraft-bedrock", 60*time.Second)
+	_, _ = executeRemoteCommandWithTimeout("sudo docker stop -t 10 minecraft-bedrock", 60*time.Second)
 	stopLogStream()
 
 	// 停止時最終バックアップ (XZ 高速並列圧縮)
-	backupScript := fmt.Sprintf(`docker run --rm -i \
+	backupScript := fmt.Sprintf(`sudo docker run --rm -i \
 		-v minecraft-data:/data:ro \
 		google/cloud-sdk:alpine sh -s << 'EOF'
 set -e
@@ -680,7 +680,7 @@ func executeRemoteCommandWithTimeout(commandLine string, timeout time.Duration) 
 			"-o", "StrictHostKeyChecking=no",
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "ConnectTimeout=5",
-			"root@"+MinecraftInternalHost,
+			"bot@"+MinecraftInternalHost,
 			commandLine,
 		)
 	} else {
@@ -714,12 +714,12 @@ func isGCEInstanceRunning() bool {
 }
 
 func syncOnlinePlayersDirect() {
-	_, err := executeRemoteCommandGetStdout("docker exec minecraft-bedrock send-command list")
+	_, err := executeRemoteCommandGetStdout("sudo docker exec minecraft-bedrock send-command list")
 	if err != nil {
 		return
 	}
 	time.Sleep(500 * time.Millisecond)
-	logOut, err := executeRemoteCommandGetStdout("docker logs --tail=5 minecraft-bedrock")
+	logOut, err := executeRemoteCommandGetStdout("sudo docker logs --tail=5 minecraft-bedrock")
 	if err != nil {
 		return
 	}
@@ -986,7 +986,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 
 		go func() {
-			remoteCommand := fmt.Sprintf("docker exec minecraft-bedrock send-command \"%s\"", cleanCmd)
+			remoteCommand := fmt.Sprintf("sudo docker exec minecraft-bedrock send-command \"%s\"", cleanCmd)
 			_, err := executeRemoteCommandGetStdout(remoteCommand)
 			if err != nil {
 				_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -1136,7 +1136,7 @@ func applyGitOpsChanges() {
 
 	// 3. 稼働中サーバーへのルール適用 (Hot Reload)
 	for _, cmdStr := range cmds {
-		_, _ = executeRemoteCommandGetStdout(fmt.Sprintf("docker exec minecraft-bedrock send-command \"%s\"", cmdStr))
+		_, _ = executeRemoteCommandGetStdout(fmt.Sprintf("sudo docker exec minecraft-bedrock send-command \"%s\"", cmdStr))
 	}
 	log.Println("【Hot Reload 完了】Gamerules を稼働中のマインクラフトサーバーへ即時適用しました")
 	notifyGitOpsSuccess()
