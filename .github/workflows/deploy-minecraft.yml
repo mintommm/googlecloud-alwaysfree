@@ -37,6 +37,8 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Prepare Single-shot Deployment Bundle
+        env:
+          DEPLOY_KEY: ${{ secrets.MINECRAFT_KRMTN_ORG_DEPLOY_KEY }}
         run: |
           mkdir -p tmp/bundle
 
@@ -72,10 +74,8 @@ jobs:
           WantedBy=multi-user.target
           EOF
 
-          if [ -n "${{ secrets.MINECRAFT_KRMTN_ORG_DEPLOY_KEY }}" ]; then
-            cat << 'EOF' > tmp/bundle/id_ed25519
-${{ secrets.MINECRAFT_KRMTN_ORG_DEPLOY_KEY }}
-EOF
+          if [ -n "$DEPLOY_KEY" ]; then
+            printf '%s\n' "$DEPLOY_KEY" > tmp/bundle/id_ed25519
             chmod 600 tmp/bundle/id_ed25519
           fi
 

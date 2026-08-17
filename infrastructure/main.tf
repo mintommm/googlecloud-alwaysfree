@@ -1,8 +1,9 @@
 resource "google_compute_instance" "minecraft01" {
-  name         = var.instance_name
-  machine_type = "e2-highcpu-2"
-  zone         = var.zone
-  tags         = ["minecraft-server"]
+  name                      = var.instance_name
+  machine_type              = "e2-highcpu-2"
+  zone                      = var.zone
+  tags                      = ["minecraft-server"]
+  allow_stopping_for_update = true
 
   boot_disk {
     initialize_params {
