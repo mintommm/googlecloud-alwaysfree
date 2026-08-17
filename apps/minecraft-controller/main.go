@@ -482,6 +482,8 @@ func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 	if err != nil {
 		return err
 	}
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -492,7 +494,11 @@ func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 		line := scanner.Text()
 		handleLogLineEvents(dg, line)
 	}
-	return cmd.Wait()
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("%w, stderr: %s", err, strings.TrimSpace(stderrBuf.String()))
+	}
+	return nil
 }
 
 func handleLogLineEvents(dg *discordgo.Session, line string) {
