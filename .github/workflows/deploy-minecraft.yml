@@ -39,7 +39,9 @@ jobs:
 
       - name: Install NumPy for Fast IAP Tunneling
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq python3-numpy || pip install numpy
+          GCLOUD_PY=$(gcloud info --format="value(basic.python_location)")
+          echo "Installing numpy to gcloud python: $GCLOUD_PY"
+          "$GCLOUD_PY" -m pip install numpy || python3 -m pip install numpy
 
       - name: Prepare Single-shot Deployment Bundle
         env:
