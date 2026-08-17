@@ -579,7 +579,7 @@ func stopBackupTicker() {
 
 func executeOnlineBackupFlow() error {
 	// 1. save hold
-	_, err := executeRemoteCommandGetStdout("docker exec minecraft-bedrock send-command \"save hold\"")
+	_, err := executeRemoteCommandWithTimeout("docker exec minecraft-bedrock send-command \"save hold\"", 60*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to send save hold: %w", err)
 	}
@@ -589,19 +589,22 @@ func executeOnlineBackupFlow() error {
 	// 2. GCS バックアップスクリプト実行 (XZ 超高圧縮 + GCS アップロード)
 	backupScript := fmt.Sprintf(`docker run --rm -i \
 		-v minecraft-data:/data:ro \
-		-v /root/.config/gcloud:/root/.config/gcloud:ro \
 		google/cloud-sdk:alpine sh -s << 'EOF'
 set -e
 cd /data/worlds
-tar -cf - kiseki | xz -9e -c > /tmp/world-data-kiseki.tar.xz
+TARGET_DIR="kiseki"
+if [ ! -d "kiseki" ] && [ -d "Kiseki" ]; then
+    TARGET_DIR="Kiseki"
+fi
+tar -cf - "$TARGET_DIR" | xz -9e -c > /tmp/world-data-kiseki.tar.xz
 gcloud storage cp /tmp/world-data-kiseki.tar.xz gs://%s-minecraft-backup/world-data-kiseki.tar.xz --quiet
 rm -f /tmp/world-data-kiseki.tar.xz
 EOF`, GCPProjectID)
 
-	_, err = executeRemoteCommandGetStdout(backupScript)
+	_, err = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
 
 	// 3. save resume
-	_, _ = executeRemoteCommandGetStdout("docker exec minecraft-bedrock send-command \"save resume\"")
+	_, _ = executeRemoteCommandWithTimeout("docker exec minecraft-bedrock send-command \"save resume\"", 60*time.Second)
 
 	if err != nil {
 		return fmt.Errorf("GCS バックアップ失敗: %w", err)
@@ -612,21 +615,24 @@ EOF`, GCPProjectID)
 }
 
 func executeOfflineBackupSequence(dg *discordgo.Session) {
-	_, _ = executeRemoteCommandGetStdout("docker stop -t 10 minecraft-bedrock")
+	_, _ = executeRemoteCommandWithTimeout("docker stop -t 10 minecraft-bedrock", 60*time.Second)
 	stopLogStream()
 
 	// 停止時最終バックアップ
 	backupScript := fmt.Sprintf(`docker run --rm -i \
 		-v minecraft-data:/data:ro \
-		-v /root/.config/gcloud:/root/.config/gcloud:ro \
 		google/cloud-sdk:alpine sh -s << 'EOF'
 set -e
 cd /data/worlds
-tar -cf - kiseki | xz -9e -c > /tmp/world-data-kiseki.tar.xz
+TARGET_DIR="kiseki"
+if [ ! -d "kiseki" ] && [ -d "Kiseki" ]; then
+    TARGET_DIR="Kiseki"
+fi
+tar -cf - "$TARGET_DIR" | xz -9e -c > /tmp/world-data-kiseki.tar.xz
 gcloud storage cp /tmp/world-data-kiseki.tar.xz gs://%s-minecraft-backup/world-data-kiseki.tar.xz --quiet
 rm -f /tmp/world-data-kiseki.tar.xz
 EOF`, GCPProjectID)
-	_, _ = executeRemoteCommandGetStdout(backupScript)
+	_, _ = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
 
 	_ = exec.Command("gcloud", "compute", "instances", "stop", InstanceName, "--zone="+Zone, "--quiet").Run()
 	if NotificationChannel != "" {
@@ -635,7 +641,11 @@ EOF`, GCPProjectID)
 }
 
 func executeRemoteCommandGetStdout(commandLine string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	return executeRemoteCommandWithTimeout(commandLine, 60*time.Second)
+}
+
+func executeRemoteCommandWithTimeout(commandLine string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "gcloud", "compute", "ssh", InstanceName,
