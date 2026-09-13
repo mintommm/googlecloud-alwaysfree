@@ -12,7 +12,7 @@ main() {
 
   if ! command -v uv &> /dev/null; then
     # Dynamic installation avoids consuming Artifact Registry storage
-    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${HOME}/.local/bin" sh
+    wget -qO- https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${HOME}/.local/bin" sh
   fi
 
   exec uv run "$(dirname "$0")/sync.py"

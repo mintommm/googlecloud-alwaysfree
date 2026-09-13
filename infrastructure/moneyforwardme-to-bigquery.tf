@@ -106,7 +106,7 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
       command = [
         "/bin/bash",
         "-c",
-        "mkdir -p /tmp/app && curl -sSL https://github.com/${var.github_repository}/archive/refs/heads/${var.github_branch}.tar.gz | tar -xz -C /tmp/app --strip-components=1 && bash /tmp/app/apps/moneyforwardme-to-bigquery/entrypoint.sh"
+        "mkdir -p /tmp/app && wget -qO- https://github.com/${var.github_repository}/archive/refs/heads/${var.github_branch}.tar.gz | tar -xz -C /tmp/app --strip-components=1 && bash /tmp/app/apps/moneyforwardme-to-bigquery/entrypoint.sh"
       ]
 
       resources {
