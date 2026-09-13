@@ -81,12 +81,6 @@ resource "google_bigquery_dataset_iam_member" "mf_sync_bq" {
   member     = "serviceAccount:${google_service_account.mf_sync.email}"
 }
 
-resource "google_project_iam_member" "mf_sync_bq_job_user" {
-  project = var.project_id
-  role    = "roles/bigquery.jobUser"
-  member  = "serviceAccount:${google_service_account.mf_sync.email}"
-}
-
 resource "google_cloud_run_v2_service" "moneyforward_sync" {
   name     = "moneyforwardme-to-bigquery"
   location = var.region
