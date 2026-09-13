@@ -13,7 +13,6 @@ import io
 import json
 import logging
 import os
-import sys
 import time
 from datetime import date, datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler

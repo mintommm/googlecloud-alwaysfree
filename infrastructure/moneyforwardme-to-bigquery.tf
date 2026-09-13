@@ -96,8 +96,8 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
     }
 
     containers {
-      # Use CircleCI browsers image to consume 0 bytes of Artifact Registry storage (Always Free)
-      image = "docker.io/cimg/python:3.13-browsers"
+      # Use pre-installed Chrome image to consume 0 bytes of Artifact Registry storage (Always Free)
+      image = "docker.io/demisto/chromium:151.0.7922.11855526"
 
       ports {
         container_port = 8080
@@ -106,7 +106,7 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
       command = [
         "/bin/bash",
         "-c",
-        "git clone --depth 1 --branch ${var.github_branch} https://github.com/${var.github_repository}.git /tmp/repo && bash /tmp/repo/apps/moneyforwardme-to-bigquery/entrypoint.sh"
+        "mkdir -p /tmp/app && curl -sSL https://github.com/${var.github_repository}/archive/refs/heads/${var.github_branch}.tar.gz | tar -xz -C /tmp/app --strip-components=1 && bash /tmp/app/apps/moneyforwardme-to-bigquery/entrypoint.sh"
       ]
 
       resources {
@@ -116,14 +116,6 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
         }
       }
 
-      env {
-        name  = "GITHUB_REPOSITORY"
-        value = var.github_repository
-      }
-      env {
-        name  = "GITHUB_BRANCH"
-        value = var.github_branch
-      }
       env {
         name  = "PROJECT_ID"
         value = var.project_id

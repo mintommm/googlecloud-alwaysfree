@@ -56,8 +56,8 @@ run "verify_cloud_run_config" {
   }
 
   assert {
-    condition     = google_cloud_run_v2_service.moneyforward_sync.template[0].containers[0].image == "docker.io/cimg/python:3.13-browsers"
-    error_message = "Cloud Run コンテナイメージが docker.io/cimg/python:3.13-browsers ではありません"
+    condition     = google_cloud_run_v2_service.moneyforward_sync.template[0].containers[0].image == "docker.io/demisto/chromium:151.0.7922.11855526"
+    error_message = "Cloud Run コンテナイメージが docker.io/demisto/chromium:151.0.7922.11855526 ではありません"
   }
 
   assert {
