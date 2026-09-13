@@ -99,6 +99,10 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
       # Use CircleCI browsers image to consume 0 bytes of Artifact Registry storage (Always Free)
       image = "docker.io/cimg/python:3.13-browsers"
 
+      ports {
+        container_port = 8080
+      }
+
       command = [
         "/bin/bash",
         "-c",

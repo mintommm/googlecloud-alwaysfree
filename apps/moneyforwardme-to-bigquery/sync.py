@@ -190,6 +190,12 @@ def parse_payload(body: bytes) -> list[date] | None:
     return None
 
 class SyncHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "healthy"}).encode("utf-8"))
+
     def do_POST(self):
         try:
             content_length = int(self.headers.get("Content-Length", 0))

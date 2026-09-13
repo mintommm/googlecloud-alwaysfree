@@ -13,10 +13,11 @@ main() {
 
   mkdir -p "${app_dir}"
 
+  export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+
   if ! command -v uv &> /dev/null; then
     # Dynamic installation avoids consuming Artifact Registry storage
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="${HOME}/.local/bin:${PATH}"
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${HOME}/.local/bin" sh
   fi
 
   curl -sSL "https://raw.githubusercontent.com/${repo}/${branch}/apps/moneyforwardme-to-bigquery/sync.py" -o "${app_dir}/sync.py"
@@ -27,6 +28,4 @@ main() {
   exec uv run "${app_dir}/sync.py"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main "$@"
-fi
+main "$@"
