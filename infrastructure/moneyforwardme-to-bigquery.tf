@@ -136,6 +136,10 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
         name  = "DISCORD_WEBHOOK_URL"
         value = var.discord_webhook_url
       }
+      env {
+        name  = "CHROME_PATH"
+        value = "/usr/bin/google-chrome"
+      }
     }
   }
 }
