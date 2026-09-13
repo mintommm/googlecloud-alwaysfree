@@ -64,6 +64,7 @@ resource "google_compute_instance" "always_free" {
 
   metadata = {
     enable-oslogin = "TRUE"
+    startup-script = local.always_free_startup_script
   }
 
   lifecycle {

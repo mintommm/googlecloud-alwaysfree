@@ -38,3 +38,22 @@ variable "bot_ssh_public_key" {
   description = "Public SSH key for always-free bot to connect directly to minecraft01"
   default     = ""
 }
+
+variable "github_repository" {
+  type        = string
+  description = "GitHub repository (owner/repo)"
+  default     = "mintommm/googlecloud-alwaysfree"
+}
+
+variable "github_branch" {
+  type        = string
+  description = "GitHub branch"
+  default     = "main"
+}
+
+variable "discord_webhook_url" {
+  type        = string
+  description = "Discord Webhook URL for notifications"
+  default     = ""
+  sensitive   = true
+}

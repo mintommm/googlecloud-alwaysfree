@@ -1,23 +1,38 @@
-# Always Free Google Cloud Infrastructure & Minecraft Controller
+# Always Free Google Cloud Infrastructure & Automation
 
-Google Cloud Platform (GCP) の Always Free（無料枠）インスタンス上で常駐稼働する Discord コントローラー Bot (`apps/minecraft-controller`)、および Minecraft Bedrock サーバーのインフラ定義（Terraform）と CI/CD パイプラインを管理するモノレポリポジトリ。
+Google Cloud Platform (GCP) の Always Free（無料枠）インスタンス上で常駐稼働する Discord コントローラー Bot (`apps/minecraft-controller`)、マネーフォワードME 家計簿明細の自動蓄積パイプライン (`apps/moneyforwardme-to-bigquery`)、およびそれらを支えるインフラ定義（Terraform）を管理するモノレポリポジトリ。
 
 ---
 
-## 1. システムアーキテクチャとインフラ設計根拠 (Why)
+## システムアーキテクチャとインフラ設計根拠 (Why)
 
 ```mermaid
 graph TD
-    USER[ユーザー / プレイヤー] -->|Discord スラッシュコマンド| BOT[apps/minecraft-controller (Always Free GCE: e2-micro)]
-    BOT -->|DDNS 自動更新| CF[Cloudflare API (alwaysfree.krmtn.org / minecraft.krmtn.org)]
-    BOT -->|Webhook リッスン :8080| GH_CONFIG[設定リポジトリ Webhook (minecraft-krmtn-org)]
-    BOT -->|1時間サイレントバックアップ| GCS[GCS バケット (5世代バージョニング / tar.xz)]
-    BOT -->|IAP / SSH 制御| GCE_MC[minecraft01 (Bedrock Server: e2-highcpu-2)]
-    BOT -->|Cloud Logging 照会| GCP_LOGS[Cloud Logging API]
-    GCE_MC -->|ログ転送| GCP_LOGS
+    subgraph GCE_ALWAYS_FREE ["常駐 GCE インスタンス (always_free: e2-micro / Always Free $0.00)"]
+        BOT["apps/minecraft-controller<br/>(Discord Bot / Go 1.26)"]
+        TIMER["systemd timer<br/>(moneyforward-sync.timer: 毎朝04:00 JST)"]
+        TRIGGER["/usr/local/bin/trigger-moneyforwardme-to-bigquery.sh<br/>(MemoryMax=256M 保護)"]
+        TIMER -->|起動| TRIGGER
+    end
+
+    subgraph MINECRAFT_SYS ["Minecraft システム"]
+        USER_MC[プレイヤー] -->|Discord コマンド| BOT
+        BOT -->|DDNS 自動更新| CF[Cloudflare API]
+        BOT -->|Webhook リッスン :8080| GH_CONFIG[設定リポジトリ Webhook]
+        BOT -->|1時間サイレントバックアップ| GCS[GCS バケット (5世代バージョニング)]
+        BOT -->|IAP / SSH 制御| GCE_MC[minecraft01 (Bedrock Server: e2-highcpu-2)]
+    end
+
+    subgraph MONEYFORWARD_SYS ["マネーフォワードME 自動蓄積パイプライン"]
+        TRIGGER -->|POST / (OIDC IDトークン認証)| RUN["Cloud Run (apps/moneyforwardme-to-bigquery)<br/>Playwright / Python 3.13"]
+        RUN -->|セッション取得・自動延長保存| SM["Secret Manager<br/>(mf-session-cookie)"]
+        RUN -->|CSVダウンロード (当月・先月・前々月)| MF[マネーフォワードME]
+        RUN -->|row_hash による MERGE アペンド| BQ["BigQuery (moneyforward dataset)<br/>raw_transactions / v_transactions_latest"]
+        RUN -->|実行結果通知| DISCORD[Discord Webhook]
+    end
 ```
 
-### 1.1 2 つの GCE インスタンスの役割分離とコスト最適化
+### 2 つの GCE インスタンスの役割分離とコスト最適化
 - **常駐 Bot インスタンス (`always_free`)**:
   - `e2-micro` / `us-central1-a` / Debian 12 / GCP Always Free（完全無料 $0.00）。
   - 24時間365日常駐し、Discord コマンド受信、Cloudflare DDNS 更新、外部設定リポジトリからの Webhook 受信を担当。
@@ -25,7 +40,7 @@ graph TD
   - `e2-highcpu-2` / `asia-northeast1-a` / Debian 12 / オンデマンド運用（プレイ中のみ起動）。
   - なぜ e2-micro で動かさないのか: e2-micro（1GB RAM）では Bedrock サーバーがメモリ不足でクラッシュするため、十分なリソースを持つインスタンスを必要な時だけ起動しコストを最小化する。
 
-### 1.2 動的 IP 運用と DNS 自動伝播確認
+### 動的 IP 運用と DNS 自動伝播確認
 - **静的 IP を使わない理由**: Always Free では停止中のインスタンスに紐づく未使用静的 IP に課金が発生するため、動的外部 IP を採用。
 - **自己修復 DDNS**: 起動時に GCE メタデータサーバー（`Metadata-Flavor: Google`）から外部 IP を取得し、Cloudflare API で `alwaysfree.krmtn.org` (Proxied: true) を自動更新。
 - **DNS 反映確認付き起動通知**:
@@ -33,7 +48,7 @@ graph TD
 
 ---
 
-## 2. Discord Bot (`apps/minecraft-controller/`) の非自明な設計判断
+## Discord Bot (`apps/minecraft-controller/`) の非自明な設計判断
 
 - **実装言語**: Go 1.26。
 - **操作パネルの呼び出し設計**:
@@ -59,32 +74,86 @@ graph TD
 
 ---
 
-## 3. インフラ・テスト・CI/CD の非自明な設計判断
+## マネーフォワードME to BigQuery パイプライン (`apps/moneyforwardme-to-bigquery/`) の非自明な設計判断
 
-- **Terraform 破壊厳禁（インプレース更新）制約**:
-  `google_compute_instance.minecraft01` はリプレイスされると動的外部 IP が変わり、コンテナの永続データや起動スクリプトの整合性が崩れるため、メタデータ変更等はインプレース更新を徹底。
+- **GCE と Cloud Run のハイブリッド構成（コスト ＆ メモリ最適化）**:
+  - なぜ GCE 上で直接ブラウザを動かさないのか: 常駐インスタンス `always_free` はメモリ 1GB（e2-micro）であり、Headless Chromium を起動すると Discord Bot を巻き込んで OOM（メモリ枯渇）クラッシュするため。
+  - Cloud Run の Always Free 枠（月 180,000 vCPU 秒 / 360,000 GiB 秒 / 200 万リクエスト）を活用し、ブラウザ処理を完全に外部委譲。追加費用 $0.00 を死守。
+- **スライディングセッション自動延長ループ（半永久自律稼働）**:
+  - マネーフォワードME（有料プラン）の本体セッション（`_moneybook_session`）は 1 年間の有効期限を持つ。
+  - Cloud Run 上の `sync.py` は、CSV 取得完了ごとに最新のブラウザストレージ状態（`context.storage_state()`）を取得し、Secret Manager（`mf-session-cookie`）に新しいバージョンとして自動上書き保存。アクセスごとに有効期限が延長され、定期的な手動再認証が不要。
+- **行ハッシュ (`row_hash`) ＋ `MERGE` による重複除外アペンド**:
+  - クレジットカードの確定遅延や過去明細修正を漏れなく追従するため、日次定期実行では当月・先月・前々月の「計 3 ヶ月分」を常にエクスポート。
+  - 各明細の全カラム値を結合した SHA256 ハッシュ（`row_hash`）を生成し、BigQuery の `MERGE` 文（`WHEN NOT MATCHED THEN INSERT`）により未変更行を完全にスキップ。データ重複やテーブル肥大化を永久防止。
+- **GCE `systemd timer` による定期実行とメモリ保護**:
+  - 毎朝 04:00 JST（`OnCalendar=*-*-* 04:00:00 Asia/Tokyo`）に `systemd timer` で自律起動。
+  - `MemoryMax=256M` の cgroups メモリ上限を設定し、同居する Discord Bot を万が一の暴走から完全保護。
+  - 実行成否や次回予定時刻は `systemctl list-timers`、詳細ログは `journalctl -u moneyforward-sync.service` で一元管理。
+- **手元 PC 用 初回ログインスクリプト (`manual_refresh_session.py`)**:
+  - PEP 723（インラインスクリプトメタデータ）準拠。手元 PC でブラウザを立ち上げて 2 段階認証（MFA）を人間が突破し、取得された Cookie を Secret Manager へ一括同期。
+
+---
+
+## インフラ・テスト・CI/CD の非自明な設計判断
+
+- **Terraform ファイル分割（ブラスト半径の最小化）**:
+  - 稼働中かつリプレイス厳禁の Minecraft インフラ（`main.tf`）と、新設のマネーフォワード連携（`moneyforwardme-to-bigquery.tf`）を分離。
+  - `always_free` の `startup-script` 定義も locals 経由で `moneyforwardme-to-bigquery.tf` に集約し、`main.tf` への変更を最小限（1 行参照）に抑制。
 - **ファイアウォール設定 (`firewall.tf`)**:
   ポート `8080/tcp`（GitHub Webhook 受信用）およびポート `19132/udp`（Minecraft Bedrock ゲーム通信用）の INGRESS 通信を許可。
 - **起動時自動ディザスタリカバリ (`minecraft-startup.sh`)**:
   コンテナ起動時にボリューム内にワールドデータが存在しない場合、GCS バケットから最新のバックアップアーカイブ（`world-data-kiseki.tar.xz`）を自動ダウンロード・解凍して復旧。
 - **コンテナログ容量制限**: `max-size=30m, max-file=3` によりディスク容量枯渇クラッシュを防止。
-- **Rootless Podman テストランナー (`test-terraform.sh`)**:
-  - なぜ Go 単体テストでの HCL パースを却下したのか: Go の HCL2 パーサーは構文エラーしか検出できず、Terraform Provider のスキーマ検証やライフサイクルルールのアサーションが不可能なため。
-  - なぜ Rootless Podman なのか: Cloudtop 上に OSS terraform がなく、`g3terraform` は Piper 専用であるため、社内ポリシー（`go/dont-install-docker`）に準拠した非特権 Rootless Podman 内で公式 `terraform:1.10.4` を実行。読み取り専用マウント（`:ro`）、`-backend=false`、`--rm` によりホスト改変とクレデンシャル漏洩を完全遮断。
-- **ネイティブ単体テスト (`main_test.tftest.hcl`)**:
-  1. `verify_backup_bucket_config`: GCS バックアップバケットの名称、リージョン（US-CENTRAL1）、バージョニング有効化、5 世代保持ライフサイクルルールのアサーション。
-  2. `verify_webhook_firewall_rule`: ポート 8080/tcp が Webhook 受信用に正しく開放されていることのアサーション。
-- **Single-shot 高速デプロイ ＆ 自動即時ロールバック (`deploy-minecraft.yml`)**:
-  NumPy 等の重い依存を排除してデプロイを約 20 秒に短縮。デプロイ直後に `systemctl is-active` でヘルスチェックを行い、起動失敗時は直前の正常バイナリへ自動ロールバック。共有鍵 `WEBHOOK_SECRET` は GitHub Secrets から GCE 上の `/opt/minecraft-controller/.env`（`chmod 600`）へ安全に注入。
-- **二重フェーズ運用とガードレールのトレードオフ**:
-  ローカル検証（Phase 1）と本番反映（Phase 2）を厳格に分離し、デプロイ直前バックアップと手動承認ゲートを設けることで本番障害を 100% 防止する。このガードレールにより、全自動デプロイと比べて 1 往復の手動確認オーバーヘッドが発生するが、データの確実な保全を優先するトレードオフを受け入れる。
-- **変更管理と検証ログの監査性**:
-  変更はすべて事前レビューを経てコミットされ、自律エージェントの検証プロセスはトランスクリプトログ（`transcript.jsonl`）によって改ざんなく追跡可能とする。
+- **Native / Rootless Podman テストランナー (`test-terraform.sh`)**:
+  - ネイティブの `terraform` CLI、またはコンテナ環境（Podman）のどちらでも同一のテストを実行可能。
+  - 読み取り専用マウント（`:ro`）、`-backend=false` によりホスト改変とクレデンシャル漏洩を完全遮断。
+- **ネイティブ仕様アサーション (`*.tftest.hcl`)**:
+  - `main_test.tftest.hcl`: バックアップバケット、ファイアウォール、一時バケット、SSH メタデータの検証（全 4 件）。
+  - `moneyforwardme-to-bigquery_test.tftest.hcl`: BigQuery データセット・テーブル・重複排除ビュー、Secret Manager、Cloud Run サービス、IAM 最小権限、GCE systemd timer 設定の検証（全 5 件）。
 
 ---
 
-## 4. ローカル開発 ＆ テスト手順 (`Makefile`)
+## ローカル開発 ＆ テスト手順 (`Makefile`)
 
-- `make test`: 全テストの一括実行（最初に Go 単体テスト、次に Rootless Podman による Terraform 品質ゲートを順次実行）。
-- `make test-bot`: Go Discord Bot 単体テスト（Mock 検証）のみ実行。
-- `make test-infra`: Terraform 品質ゲート（fmt, init, validate, test）のみ実行。
+テストターゲットはモジュールごとに完全に分離・独立しています：
+
+```bash
+# 全モジュールのテストを一括実行
+make test
+
+# モジュール別: Minecraft Controller (Go Bot)
+make test-minecraft-controller
+
+# モジュール別: マネーフォワードME to BigQuery (Python & Shell)
+make test-moneyforwardme-to-bigquery
+make test-moneyforwardme-to-bigquery-python  # pytest (34件)
+make test-moneyforwardme-to-bigquery-shell   # bash (12件)
+
+# モジュール別: インフラ (Terraform 品質ゲート)
+make test-infra                             # 全インフラテスト (9件)
+make test-infra-minecraft                   # Minecraft & コアインフラテスト (4件)
+make test-infra-moneyforwardme-to-bigquery  # マネーフォワードMEインフラテスト (5件)
+```
+
+---
+
+## マネーフォワードME パイプラインの運用手順
+
+### 初回セッション Cookie 登録（人間作業）
+手元 PC（ブラウザ操作可能な環境）で以下を実行し、マネーフォワードMEにログインします：
+```bash
+cd apps/moneyforwardme-to-bigquery
+uv run manual_refresh_session.py
+```
+ブラウザが起動したらログイン（2段階認証含む）を完了させます。家計簿ホーム画面が表示されると自動検知され、最新の Cookie JSON が Google Cloud Secret Manager（`mf-session-cookie`）に保存されます。
+
+### GCE 上での手動バックフィル（過去月一括取得）
+過去の任意期間を遡って BigQuery に蓄積したい場合は、GCE `always_free` 上で引数を指定してトリガースクリプトを実行します：
+```bash
+# 単月のみバックフィル (例: 2024年5月)
+/usr/local/bin/trigger-moneyforwardme-to-bigquery.sh 2024-05
+
+# 期間指定バックフィル (例: 2024年1月 〜 2024年12月)
+/usr/local/bin/trigger-moneyforwardme-to-bigquery.sh 2024-01 2024-12
+```
+既存の明細と重複する行は `row_hash` により自動スキップされ、未取得の明細のみがクリーンにアペンドされます。

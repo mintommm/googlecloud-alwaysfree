@@ -20,6 +20,7 @@ jobs:
     env:
       TF_VAR_allow_list_users: ${{ secrets.MC_ALLOW_LIST_USERS }}
       TF_VAR_bot_ssh_public_key: ${{ secrets.BOT_SSH_PUBLIC_KEY }}
+      TF_VAR_discord_webhook_url: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@v4'
