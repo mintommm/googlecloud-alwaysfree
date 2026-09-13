@@ -56,8 +56,13 @@ run "verify_cloud_run_config" {
   }
 
   assert {
-    condition     = google_cloud_run_v2_service.moneyforward_sync.template[0].containers[0].image == "mcr.microsoft.com/playwright/python:latest"
-    error_message = "Cloud Run コンテナイメージが mcr.microsoft.com/playwright/python:latest ではありません"
+    condition     = google_cloud_run_v2_service.moneyforward_sync.template[0].containers[0].image == "docker.io/cimg/python:3.13-browsers"
+    error_message = "Cloud Run コンテナイメージが docker.io/cimg/python:3.13-browsers ではありません"
+  }
+
+  assert {
+    condition     = google_cloud_run_v2_service.moneyforward_sync.template[0].execution_environment == "EXECUTION_ENVIRONMENT_GEN2"
+    error_message = "Cloud Run 実行環境が EXECUTION_ENVIRONMENT_GEN2 ではありません"
   }
 
   assert {

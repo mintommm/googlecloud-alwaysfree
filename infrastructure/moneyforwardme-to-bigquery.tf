@@ -86,8 +86,9 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
   location = var.region
 
   template {
-    service_account = google_service_account.mf_sync.email
-    timeout         = "600s"
+    service_account       = google_service_account.mf_sync.email
+    timeout               = "600s"
+    execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
 
     scaling {
       # Prevent concurrent scraping sessions from colliding or getting rate-limited by MoneyForward
@@ -95,8 +96,8 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
     }
 
     containers {
-      # Use public image to consume 0 bytes of Artifact Registry storage (Always Free)
-      image = "mcr.microsoft.com/playwright/python:latest"
+      # Use CircleCI browsers image to consume 0 bytes of Artifact Registry storage (Always Free)
+      image = "docker.io/cimg/python:3.13-browsers"
 
       command = [
         "/bin/bash",

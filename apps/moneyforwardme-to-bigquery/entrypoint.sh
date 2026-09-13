@@ -9,17 +9,20 @@ set -euo pipefail
 main() {
   local repo="${GITHUB_REPOSITORY:-mintommm/googlecloud-alwaysfree}"
   local branch="${GITHUB_BRANCH:-main}"
-  local app_dir="${APP_DIR:-/app}"
+  local app_dir="${APP_DIR:-/tmp/app}"
 
   mkdir -p "${app_dir}"
 
   if ! command -v uv &> /dev/null; then
-    # Official Playwright image lacks uv; dynamic installation avoids consuming Artifact Registry storage
+    # Dynamic installation avoids consuming Artifact Registry storage
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="${HOME}/.local/bin:${PATH}"
   fi
 
   curl -sSL "https://raw.githubusercontent.com/${repo}/${branch}/apps/moneyforwardme-to-bigquery/sync.py" -o "${app_dir}/sync.py"
+
+  # Ensure Playwright Chromium browser is installed
+  uv run --with playwright playwright install chromium
 
   exec uv run "${app_dir}/sync.py"
 }
