@@ -140,6 +140,10 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
         name  = "CHROME_PATH"
         value = "/usr/bin/google-chrome"
       }
+      env {
+        name  = "APP_VERSION"
+        value = filesha1("${path.module}/../apps/moneyforwardme-to-bigquery/sync.py")
+      }
     }
   }
 }
