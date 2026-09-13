@@ -145,7 +145,12 @@ def run_sync(target_months: list[date] | None = None) -> dict:
     all_rows = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        chrome_path = os.environ.get("CHROME_PATH", "/usr/bin/google-chrome")
+        browser = p.chromium.launch(
+            executable_path=chrome_path,
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
         context = browser.new_context(storage_state=storage_state)
         page = context.new_page()
 
