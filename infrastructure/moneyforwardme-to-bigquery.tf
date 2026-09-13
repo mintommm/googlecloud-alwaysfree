@@ -106,7 +106,7 @@ resource "google_cloud_run_v2_service" "moneyforward_sync" {
       command = [
         "/bin/bash",
         "-c",
-        "curl -sSL https://raw.githubusercontent.com/${var.github_repository}/${var.github_branch}/apps/moneyforwardme-to-bigquery/entrypoint.sh | bash"
+        "git clone --depth 1 --branch ${var.github_branch} https://github.com/${var.github_repository}.git /tmp/repo && bash /tmp/repo/apps/moneyforwardme-to-bigquery/entrypoint.sh"
       ]
 
       resources {
