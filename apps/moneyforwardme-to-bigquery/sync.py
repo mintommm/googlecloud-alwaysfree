@@ -83,10 +83,14 @@ def download_monthly_csv(page, year: str, month: str) -> bytes:
     url = f"https://moneyforward.com/cf/csv?from={year}%2F{month}%2F01&month={month}&year={year}"
     logging.info(f"Downloading CSV for {year}-{month}: {url}")
     with page.expect_download(timeout=30000) as download_info:
-        resp = page.goto(url)
-        # MoneyForward redirects to sign_in (HTTP 200/302) instead of returning 401/403 when session expires
-        if resp and "sign_in" in resp.url:
-            raise SessionExpiredError("[moneyforwardme-to-bigquery] Session expired. Requires human re-authentication via manual_refresh_session.py.")
+        try:
+            resp = page.goto(url)
+            if resp and ("sign_in" in resp.url or "id.moneyforward.com" in resp.url):
+                raise SessionExpiredError("[moneyforwardme-to-bigquery] Session expired. Requires human re-authentication via manual_refresh_session.py.")
+        except SessionExpiredError:
+            raise
+        except Exception as nav_err:
+            logging.info(f"Navigation info during download: {nav_err}")
     download = download_info.value
     path = download.path()
     with open(path, "rb") as f:
@@ -151,10 +155,29 @@ def run_sync(target_months: list[date] | None = None) -> dict:
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
         )
-        context = browser.new_context(storage_state=storage_state)
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/130.0.0.0 Safari/537.36"
+        )
+        context = browser.new_context(
+            storage_state=storage_state,
+            user_agent=user_agent,
+        )
         page = context.new_page()
 
         try:
+            logging.info("Opening https://moneyforward.com/cf to activate and verify session...")
+            page.goto("https://moneyforward.com/cf")
+            current_url = str(page.url) if page.url else ""
+            logging.info(f"Session check URL: {current_url}")
+
+            if "sign_in" in current_url or "id.moneyforward.com" in current_url:
+                raise SessionExpiredError(
+                    f"[moneyforwardme-to-bigquery] Session expired (redirected to {current_url}). "
+                    "Requires human re-authentication via manual_refresh_session.py."
+                )
+
             for idx, target in enumerate(target_months):
                 if idx > 0:
                     # MoneyForward terminates active sessions (302 redirect) if CSVs are requested too rapidly
