@@ -95,6 +95,11 @@ run "verify_iam_permissions" {
   }
 
   assert {
+    condition     = google_project_iam_member.mf_sync_bq_job_user.role == "roles/bigquery.jobUser"
+    error_message = "Cloud Run SA に BigQuery jobUser 権限が付与されていません"
+  }
+
+  assert {
     condition     = google_cloud_run_v2_service_iam_member.gce_invoker.role == "roles/run.invoker"
     error_message = "GCE SA に run.invoker 権限が付与されていません"
   }
