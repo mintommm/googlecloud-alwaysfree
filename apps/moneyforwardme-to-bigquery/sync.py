@@ -192,10 +192,20 @@ def run_sync(target_months: list[date] | None = None) -> dict:
         finally:
             browser.close()
 
-    # MoneyForward extends session validity on each access; persisting latest state maintains autonomous loop
-    update_secret(SECRET_ID, json.dumps(new_storage_state, ensure_ascii=False))
-
     inserted_count = merge_transactions(bq_client, all_rows)
+
+    # Filter storage_state to essential cookies only to prevent exceeding Secret Manager's 64KiB limit
+    clean_storage_state = {
+        "cookies": [
+            c for c in new_storage_state.get("cookies", [])
+            if isinstance(c, dict) and "moneyforward.com" in c.get("domain", "")
+        ],
+        "origins": [],
+    }
+
+    # MoneyForward extends session validity on each access; persisting latest state maintains autonomous loop
+    update_secret(SECRET_ID, json.dumps(clean_storage_state, ensure_ascii=False))
+
     msg = f"[moneyforwardme-to-bigquery] Sync completed: {inserted_count} rows inserted ({len(all_rows) - inserted_count} skipped duplicates, session extended)."
     notify_discord(msg)
     return {"status": "success", "inserted_count": inserted_count, "total_inspected": len(all_rows)}
