@@ -1,6 +1,6 @@
 # Always Free Google Cloud Infrastructure & Automation
 
-Google Cloud Platform (GCP) の Always Free（無料枠）インスタンス上で常駐稼働する Discord コントローラー Bot (`apps/minecraft-controller`)、マネーフォワードME 家計簿明細の自動蓄積パイプライン (`apps/moneyforwardme-to-bigquery`)、およびそれらを支えるインフラ定義（Terraform）を管理するモノレポリポジトリ。
+Google Cloud Platform (GCP)のAlways Free（無料枠）インスタンス上で常駐稼働するDiscordコントローラーBot (`apps/minecraft-controller`)、マネーフォワードME家計簿明細の自動蓄積パイプライン (`apps/moneyforwardme-to-bigquery`)、およびそれらを支えるインフラ定義（Terraform）を管理するモノレポリポジトリ。
 
 ---
 
@@ -18,9 +18,9 @@ graph TD
     subgraph MINECRAFT_SYS ["Minecraft システム"]
         USER_MC[プレイヤー] -->|Discord コマンド| BOT
         BOT -->|DDNS 自動更新| CF[Cloudflare API]
-        BOT -->|Webhook リッスン :8080| GH_CONFIG[設定リポジトリ Webhook]
+        BOT -->|Webhook リッスン :80| GH_CONFIG[設定リポジトリ Webhook]
         BOT -->|1時間サイレントバックアップ| GCS[GCS バケット (5世代バージョニング)]
-        BOT -->|IAP / SSH 制御| GCE_MC[minecraft01 (Bedrock Server: e2-highcpu-2)]
+        BOT -->|Compute Engine REST API / VPC内部SSH| GCE_MC[minecraft01 (Bedrock Server: e2-highcpu-2)]
     end
 
     subgraph MONEYFORWARD_SYS ["マネーフォワードME 自動蓄積パイプライン"]
@@ -32,96 +32,102 @@ graph TD
     end
 ```
 
-### 2 つの GCE インスタンスの役割分離とコスト最適化
-- **常駐 Bot インスタンス (`always_free`)**:
-  - `e2-micro` / `us-central1-a` / Debian 12 / GCP Always Free（完全無料 $0.00）。
-  - 24時間365日常駐し、Discord コマンド受信、Cloudflare DDNS 更新、外部設定リポジトリからの Webhook 受信を担当。
-- **Minecraft サーバーインスタンス (`minecraft01`)**:
-  - `e2-highcpu-2` / `asia-northeast1-a` / Debian 12 / オンデマンド運用（プレイ中のみ起動）。
-  - なぜ e2-micro で動かさないのか: e2-micro（1GB RAM）では Bedrock サーバーがメモリ不足でクラッシュするため、十分なリソースを持つインスタンスを必要な時だけ起動しコストを最小化する。
+### 2つのGCEインスタンスの役割分離とコスト最適化
+- **常駐Botインスタンス (`always_free`)**:
+  - `e2-micro` / `us-central1-a` / Debian 12 / GCP Always Free（無料枠）。
+  - 24時間常駐し、Discordコマンド受信、Cloudflare DDNS更新、外部設定リポジトリからのWebhook受信を担当。
+- **Minecraftサーバーインスタンス (`minecraft01`)**:
+  - `e2-highcpu-2` / `asia-northeast1-a` / Container-Optimized OS (`cos-stable`) / オンデマンド運用（プレイ中のみ起動）。
+  - `e2-micro`で動かさない理由: `e2-micro`（1GB RAM）ではBedrockサーバーがメモリ不足でクラッシュするため、必要なリソースを持つインスタンスをプレイ時のみ起動してコストを抑える。
+  - サービスアカウント構成: `always_free`と`minecraft01`の双方にCompute Engineデフォルトサービスアカウント（`cloud-platform`スコープ）を付与し、起動時のGCS自動リストア・バックアップ退避・Cloud Logging出力を行う。
 
-### 動的 IP 運用と DNS 自動伝播確認
-- **静的 IP を使わない理由**: Always Free では停止中のインスタンスに紐づく未使用静的 IP に課金が発生するため、動的外部 IP を採用。
-- **自己修復 DDNS**: 起動時に GCE メタデータサーバー（`Metadata-Flavor: Google`）から外部 IP を取得し、Cloudflare API で `alwaysfree.krmtn.org` (Proxied: true) を自動更新。
-- **DNS 反映確認付き起動通知**:
-  `minecraft01` 起動時に `minecraft.krmtn.org` (Proxied: false) を更新後、直ちに通知せず公開 DNS（1.1.1.1 / 8.8.8.8）で名前解決の伝播を確認してから起動操作者へ `@メンション` 通知を送信。DNS キャッシュ遅延による接続失敗を完全防止。
+### 動的IP運用とDNS伝播確認
+- **静的IPを使わない理由**: Always Freeでは停止中のインスタンスに紐づく未使用静的IPに課金が発生するため、エフェメラル動的外部IPを採用。
+- **自己修復DDNS**: 起動時にGCEメタデータサーバー（`Metadata-Flavor: Google`）から外部IPを取得し、Cloudflare APIで`alwaysfree.krmtn.org`（`Proxied: true`）を自動更新。
+- **DNS反映確認付き起動通知**:
+  `minecraft01`起動時に`minecraft.krmtn.org`（`Proxied: false`）を更新後、公開DNS（`1.1.1.1`）で名前解決の伝播を確認してから起動操作者へ`@メンション`通知を送信し、DNSキャッシュ遅延による接続失敗を防ぐ。
 
 ---
 
-## Discord Bot (`apps/minecraft-controller/`) の非自明な設計判断
+## Discord Bot (`apps/minecraft-controller/`) の設計判断
 
 - **実装言語**: Go 1.26。
+- **GCE REST API直接呼び出しによる省CPUポーリング**:
+  - `e2-micro`上で`gcloud compute instances describe`（Pythonプロセス）を高頻度で起動するとCPU負荷が高騰するため、GCEメタデータサーバーからOAuth2トークンを取得してCompute Engine v1 REST APIを直接呼び出し、インスタンス稼働状態（`status`）と外部IP（`natIP`）を照会する。
+  - `minecraft01`が停止中（`TERMINATED`）の間はポーリング間隔を30秒に緩和し、稼働中のストリーム再接続時は5秒間隔で試行する。
+- **Discord Gateway WebSocket死活監視（Watchdog）**:
+  - 長期稼働中にDiscord GatewayのWebSocket接続が切断されたままプロセスが残存する事象を防ぐため、1分周期で`startDiscordWatchdog`が接続状態とAPI応答（`dg.User("@me")`）を確認する。
+  - 切断検知時は再接続を試行し、3回連続で失敗した場合はプロセスを終了して`systemd`（`Restart=always`）による自動再起動へ委譲する。また、シャットダウン時のスラッシュコマンド削除（`ApplicationCommandDelete`）は行わず、登録済みコマンド定義を維持する。
 - **操作パネルの呼び出し設計**:
-  チャンネルへの常時連投による画面埋め尽くしを防ぐため、`/panel` スラッシュコマンドによる明示的呼び出し時のみ操作パネル（ボタンおよび Modal 入力フォーム）を表示。
+  チャンネルへの常時連投による画面埋め尽くしを防ぐため、`/panel`スラッシュコマンドによる明示的呼び出し時のみ操作パネル（ボタン）を表示。
 - **透過的ログ閲覧 (`/logs [lines] [query]`)**:
-  - GCE への SSH を行わず Cloud Logging API を直接照会（フィルタ: `resource.type="gce_instance" AND resource.labels.instance_id="minecraft01"`）。月 50GB の無料枠内で運用し追加コスト $0.00。インスタンス停止後も過去ログを閲覧可能。
-  - `extractCleanLogMessage` 型スイッチ: GCE Syslog（純粋文字列 `textPayload`）と Docker/Fluentd（JSON `jsonPayload` の `message` / `log` キー）の両形式に対応し、ログ本文を型安全に抽出。タイムスタンプは `[YYYY-MM-DD HH:MM:SS]` (JST) で整形し、青色 Embed で視認性高く返信。
-  - **Discord 2000 文字制限の自動分割**: ログ出力が Discord メッセージの上限（2000 文字）を超える場合、Bot 側で安全に chunk 分割して連続送信する。
-- **即時 Ack コマンド送信 (`/cmd <command>`)**:
-  - Bedrock サーバーの stdout は他プレイヤーのチャットログと混線しパースが極めて不安定なため、実行結果のパースを行わず「✅ サーバーへ正常に送信されました」という Ack を即座に応答（混線・保守コスト完全排除）。
-- **10 分無人自動シャットダウン ＆ 再デプロイ誤停止防止**:
-  - ログストリーム常時監視により、プレイヤー 0 人から 10 分で自動停止。
-  - Bot 起動時に `send-command "list"` を実行して実オンライン人数を照合。Bot 再デプロイ時にプレイヤーがいるにもかかわらず人数が 0 と誤認されて 10 分後に停止する事故を 100% 防止。
-- **高圧縮バックアップ基盤 ＆ GCS バージョニング**:
-  - 1 時間ごとの完全サイレント定期実行（プレイを邪魔しない）＋ 手動 `/backup` ＋ 停止時実行。
-  - XZ 超高圧縮（`tar.xz -9e`）を採用し、Always Free の転送量および GCS 容量を最小化。単一ワールド `kiseki` は `world-data-kiseki.tar.xz` として保存。
-  - GCS バケット（`gs://${project_id}-minecraft-backup`）のバージョニングを最新 5 世代（`num_newer_versions = 5, with_state = "ARCHIVED"`）に制限し、容量超過課金を永久防止。
-- **GitOps Webhook Hot Reload エンジン**:
-  - ポート `8080/webhook` で HTTP POST を受信。`X-Hub-Signature-256` による HMAC-SHA256 署名検証（`http.MaxBytesReader` 1MB 制限）。
-  - GCE 上の `/opt/minecraft-controller/config-repo` で `git pull origin main` を実行し、`worlds.yaml` をパース。
-  - `defaults.settings` に基づく事前検証を行い、未定義キーや構文エラー検知時は Discord へ ⚠️ エラー通知を送信して安全に中断。
-  - 検証通過時はアクティブワールドの設定を `send-command` で稼働中コンテナへ即時反映（Hot Reload）。サーバー起動時（`/start` 完了時）にも自動同期を実行。
+  - GCEへのSSHを行わずCloud Logging APIを直接照会（フィルタ: `resource.type="gce_instance" AND resource.labels.instance_id="minecraft01"`）。月50GBの無料枠内で運用し、インスタンス停止後も過去ログを閲覧可能。
+  - `extractCleanLogMessage`型スイッチ: GCE Syslog（文字列 `textPayload`）とDocker/Fluentd（JSON `jsonPayload`の`message` / `log`キー）の両形式に対応し、ログ本文を型安全に抽出。タイムスタンプは`[YYYY-MM-DD HH:MM:SS]`（JST）で整形し、青色Embedで返信。
+- **Ack応答コマンド送信 (`/cmd <command>`)**:
+  - Bedrockサーバーのstdoutは他プレイヤーのチャットログと混線しパースが不安定なため、実行結果のパースを行わず送信完了のAckを応答する。
+- **10分無人自動シャットダウン ＆ 起動時オンライン人数同期**:
+  - ログストリーム監視により、プレイヤー退出で0人になった時点から10分で自動停止タイマー（`triggerEmptyServerTimerLocked`）を起動する。
+  - Bot起動時およびストリーム接続確立時に`syncOnlinePlayersDirect`（`send-command "list"`）を実行して実オンライン人数を照合する。プレイヤーが存在する場合はタイマーを解除して再デプロイ時の誤停止を防ぎ、0人であった場合はその時点から10分自動停止タイマーを起動して無人稼働の放置を防ぐ。
+- **ストリーミングバックアップ基盤 ＆ GCSバージョニング**:
+  - 1時間ごとのサイレント定期実行＋手動`/backup`＋停止時実行。
+  - `google/cloud-sdk:alpine`コンテナ標準搭載の`gzip`（`tar -czf -`）による標準出力パイプラインで`gs://${project_id}-minecraft-backup/world-data-kiseki.tar.gz`へ直接ストリーミング保存する。
+  - GCSバケットのバージョニングを最新5世代（`num_newer_versions = 5, with_state = "ARCHIVED"`）に制限し、容量超過課金を防止。
+- **GitOps Webhook Hot Reloadエンジン**:
+  - Cloudflare Proxy（`https://alwaysfree.krmtn.org/webhook`）経由でポート`80/webhook`（環境変数`WEBHOOK_PORT`で変更可）にてHTTP POSTを受信。`X-Hub-Signature-256`によるHMAC-SHA256署名検証（`http.MaxBytesReader` 1MB制限）。
+  - GCE上の`/opt/minecraft-controller/config-repo`で`git pull origin main`を実行し、`worlds.yaml`をパース。
+  - `defaults.settings`に基づく事前検証を行い、未定義キーや構文エラー検知時はDiscordへエラー通知を送信して中断。
+  - 検証通過時はアクティブワールドの設定を`send-command`で稼働中コンテナへ反映（Hot Reload）。サーバー起動時（`/start`完了時）にも自動同期を実行。
 
 ---
 
-## マネーフォワードME to BigQuery パイプライン (`apps/moneyforwardme-to-bigquery/`) の非自明な設計判断
+## マネーフォワードME to BigQuery パイプライン (`apps/moneyforwardme-to-bigquery/`) の設計判断
 
-- **GCE と Cloud Run のハイブリッド構成（コスト ＆ メモリ最適化）**:
-  - なぜ GCE 上で直接ブラウザを動かさないのか: 常駐インスタンス `always_free` はメモリ 1GB（e2-micro）であり、Headless Chromium を起動すると Discord Bot を巻き込んで OOM（メモリ枯渇）クラッシュするため。
-  - Cloud Run の Always Free 枠（月 180,000 vCPU 秒 / 360,000 GiB 秒 / 200 万リクエスト）を活用し、ブラウザ処理を完全に外部委譲。追加費用 $0.00 を死守。
-- **スライディングセッション自動延長ループ（半永久自律稼働）**:
-  - マネーフォワードME（有料プラン）の本体セッション（`_moneybook_session`）は 1 年間の有効期限を持つ。
-  - Cloud Run 上の `sync.py` は、CSV 取得完了ごとに最新のブラウザストレージ状態（`context.storage_state()`）を取得し、Secret Manager（`mf-session-cookie`）に新しいバージョンとして自動上書き保存。アクセスごとに有効期限が延長され、定期的な手動再認証が不要。
+- **GCEとCloud Runのハイブリッド構成（コスト ＆ メモリ最適化）**:
+  - GCE上で直接ブラウザを動かさない理由: 常駐インスタンス`always_free`はメモリ1GB（`e2-micro`）であり、Headless Chromiumを起動するとDiscord Botを巻き込んでOOM（メモリ枯渇）クラッシュするため。
+  - Cloud RunのAlways Free枠（月180,000 vCPU秒 / 360,000 GiB秒 / 200万リクエスト）を活用し、ブラウザ処理を外部委譲。
+- **スライディングセッション自動延長ループ**:
+  - マネーフォワードME（有料プラン）の本体セッション（`_moneybook_session`）は1年間の有効期限を持つ。
+  - Cloud Run上の`sync.py`は、CSV取得完了ごとに最新のブラウザストレージ状態（`context.storage_state()`）を取得し、Secret Manager（`mf-session-cookie`）に新しいバージョンとして自動上書き保存。アクセスごとに有効期限が延長され、定期的な手動再認証が不要。
 - **行ハッシュ (`row_hash`) ＋ `MERGE` による重複除外アペンド**:
-  - クレジットカードの確定遅延や過去明細修正を漏れなく追従するため、日次定期実行では当月・先月・前々月の「計 3 ヶ月分」を常にエクスポート。
-  - 各明細の全カラム値を結合した SHA256 ハッシュ（`row_hash`）を生成し、BigQuery の `MERGE` 文（`WHEN NOT MATCHED THEN INSERT`）により未変更行を完全にスキップ。データ重複やテーブル肥大化を永久防止。
+  - クレジットカードの確定遅延や過去明細修正を追従するため、日次定期実行では当月・先月・前々月の計3ヶ月分をエクスポート。
+  - 各明細の全カラム値を結合したSHA256ハッシュ（`row_hash`）を生成し、BigQueryの`MERGE`文（`WHEN NOT MATCHED THEN INSERT`）により未変更行をスキップしてデータ重複を防止。
 - **GCE `systemd timer` による定期実行とメモリ保護**:
-  - 毎朝 04:00 JST（`OnCalendar=*-*-* 04:00:00 Asia/Tokyo`）に `systemd timer` で自律起動。
-  - `MemoryMax=256M` の cgroups メモリ上限を設定し、同居する Discord Bot を万が一の暴走から完全保護。
-  - 実行成否や次回予定時刻は `systemctl list-timers`、詳細ログは `journalctl -u moneyforward-sync.service` で一元管理。
-- **手元 PC 用 初回ログインスクリプト (`manual_refresh_session.py`)**:
-  - PEP 723（インラインスクリプトメタデータ）準拠。手元 PC でブラウザを立ち上げて 2 段階認証（MFA）を人間が突破し、取得された Cookie を Secret Manager へ一括同期。
+  - 毎朝04:00 JST（`OnCalendar=*-*-* 04:00:00 Asia/Tokyo`）に`systemd timer`で自律起動。
+  - `MemoryMax=256M`のcgroupsメモリ上限を設定し、同居するDiscord Botをメモリ圧迫から保護。
+  - 実行成否や次回予定時刻は`systemctl list-timers`、詳細ログは`journalctl -u moneyforward-sync.service`で管理。
+- **手元PC用 初回ログインスクリプト (`manual_refresh_session.py`)**:
+  - PEP 723（インラインスクリプトメタデータ）準拠。手元PCでブラウザを立ち上げて2段階認証（MFA）を人間が突破し、取得されたCookieをSecret Managerへ同期。
 
 ---
 
-## インフラ・テスト・CI/CD の非自明な設計判断
+## インフラ・テスト・CI/CDの設計判断
 
-- **Terraform ファイル分割（ブラスト半径の最小化）**:
-  - 稼働中かつリプレイス厳禁の Minecraft インフラ（`main.tf`）と、新設のマネーフォワード連携（`moneyforwardme-to-bigquery.tf`）を分離。
-  - `always_free` の `startup-script` 定義も locals 経由で `moneyforwardme-to-bigquery.tf` に集約し、`main.tf` への変更を最小限（1 行参照）に抑制。
+- **Terraformファイル分割（影響範囲の局所化）**:
+  - リプレイス禁止のMinecraftインフラ（`main.tf`）と、マネーフォワード連携（`moneyforwardme-to-bigquery.tf`）を分離。
+  - `always_free`の`startup-script`定義もlocals経由で`moneyforwardme-to-bigquery.tf`に集約し、`main.tf`への変更を最小限に抑制。
 - **ファイアウォール設定 (`firewall.tf`)**:
-  ポート `8080/tcp`（GitHub Webhook 受信用）およびポート `19132/udp`（Minecraft Bedrock ゲーム通信用）の INGRESS 通信を許可。
+  ポート`80/tcp`・`8080/tcp`（Cloudflare経由のGitHub Webhook受信用）、ポート`22/tcp`（GCP IAP `35.235.240.0/20`からのSSH用）、ポート`19132/udp`（Minecraft Bedrockゲーム通信用）、およびVPC内部通信（`10.128.0.0/9`）のINGRESS通信を許可。
 - **起動時自動ディザスタリカバリ (`minecraft-startup.sh`)**:
-  コンテナ起動時にボリューム内にワールドデータが存在しない場合、GCS バケットから最新のバックアップアーカイブ（`world-data-kiseki.tar.xz`）を自動ダウンロード・解凍して復旧。
-- **コンテナログ容量制限**: `max-size=30m, max-file=3` によりディスク容量枯渇クラッシュを防止。
-- **Native / Rootless Podman テストランナー (`test-terraform.sh`)**:
-  - ネイティブの `terraform` CLI、またはコンテナ環境（Podman）のどちらでも同一のテストを実行可能。
-  - 読み取り専用マウント（`:ro`）、`-backend=false` によりホスト改変とクレデンシャル漏洩を完全遮断。
+  コンテナ起動時にボリューム内にワールドデータが存在しない場合、GCSバケットから最新のバックアップアーカイブ（`world-data-kiseki.tar.gz`、フォールバックとして`world-data-kiseki.tar.xz`）を自動ダウンロード・解凍して復旧。
+- **コンテナログ容量制限**: `max-size=30m, max-file=3`によりディスク容量枯渇を防止。
+- **Native / Rootless Podmanテストランナー (`test-terraform.sh`)**:
+  - 公式コンテナイメージ（`docker.io/hashicorp/terraform:1.11.4`）をRootless Podman上で実行、またはネイティブの`terraform` CLIで同一のテストを実行可能。
+  - リポジトリルートを`/workspace`へマウントし（`fmt -check`時は`:ro`）、`-backend=false`によりホスト改変とクレデンシャル漏洩を遮断しつつ`../apps/`配下のファイルハッシュ参照（`filesha1`）および`override_during = plan`を検証。
 - **ネイティブ仕様アサーション (`*.tftest.hcl`)**:
-  - `main_test.tftest.hcl`: バックアップバケット、ファイアウォール、一時バケット、SSH メタデータの検証（全 4 件）。
-  - `moneyforwardme-to-bigquery_test.tftest.hcl`: BigQuery データセット・テーブル・重複排除ビュー、Secret Manager、Cloud Run サービス、IAM 最小権限、GCE systemd timer 設定の検証（全 5 件）。
+  - `main_test.tftest.hcl`: バックアップバケット、ファイアウォール、デプロイ一時バケット、`minecraft01`のSSHメタデータおよびサービスアカウントスコープの検証（全4件）。
+  - `moneyforwardme-to-bigquery_test.tftest.hcl`: BigQueryデータセット・テーブル・重複排除ビュー、Secret Manager、Cloud Runサービス、IAM最小権限、GCE `systemd timer`設定の検証（全5件）。
 
 ---
 
 ## ローカル開発 ＆ テスト手順 (`Makefile`)
 
-テストターゲットはモジュールごとに完全に分離・独立しています：
+テストターゲットはモジュールごとに分離・独立しています：
 
 ```bash
 # 全モジュールのテストを一括実行
 make test
 
-# モジュール別: Minecraft Controller (Go Bot)
+# モジュール別: Minecraft Controller (Go Bot: 9件)
 make test-minecraft-controller
 
 # モジュール別: マネーフォワードME to BigQuery (Python & Shell)
@@ -137,18 +143,18 @@ make test-infra-moneyforwardme-to-bigquery  # マネーフォワードMEイン�
 
 ---
 
-## マネーフォワードME パイプラインの運用手順
+## マネーフォワードMEパイプラインの運用手順
 
-### 初回セッション Cookie 登録（人間作業）
-手元 PC（ブラウザ操作可能な環境）で以下を実行し、マネーフォワードMEにログインします：
+### 初回セッションCookie登録（人間作業）
+手元PC（ブラウザ操作可能な環境）で以下を実行し、マネーフォワードMEにログインします：
 ```bash
 cd apps/moneyforwardme-to-bigquery
 uv run manual_refresh_session.py
 ```
-ブラウザが起動したらログイン（2段階認証含む）を完了させます。家計簿ホーム画面が表示されると自動検知され、最新の Cookie JSON が Google Cloud Secret Manager（`mf-session-cookie`）に保存されます。
+ブラウザが起動したらログイン（2段階認証含む）を完了させます。家計簿ホーム画面が表示されると自動検知され、最新のCookie JSONがGoogle Cloud Secret Manager（`mf-session-cookie`）に保存されます。
 
-### GCE 上での手動バックフィル（過去月一括取得）
-過去の任意期間を遡って BigQuery に蓄積したい場合は、GCE `always_free` 上で引数を指定してトリガースクリプトを実行します：
+### GCE上での手動バックフィル（過去月一括取得）
+過去の任意期間を遡ってBigQueryに蓄積したい場合は、GCE `always_free`上で引数を指定してトリガースクリプトを実行します：
 ```bash
 # 単月のみバックフィル (例: 2024年5月)
 /usr/local/bin/trigger-moneyforwardme-to-bigquery.sh 2024-05
@@ -156,4 +162,4 @@ uv run manual_refresh_session.py
 # 期間指定バックフィル (例: 2024年1月 〜 2024年12月)
 /usr/local/bin/trigger-moneyforwardme-to-bigquery.sh 2024-01 2024-12
 ```
-既存の明細と重複する行は `row_hash` により自動スキップされ、未取得の明細のみがクリーンにアペンドされます。
+既存の明細と重複する行は`row_hash`により自動スキップされ、未取得の明細のみがクリーンにアペンドされます。
