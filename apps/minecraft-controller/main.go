@@ -239,10 +239,11 @@ func main() {
 		{Name: "backup", Description: "手動で即時バックアップを実行し GCS へ退避します"},
 	}
 
-	registeredCommands, err := dg.ApplicationCommandBulkOverwrite(dg.State.User.ID, GuildID, commands)
-	if err != nil {
+	if _, err := dg.ApplicationCommandBulkOverwrite(dg.State.User.ID, GuildID, commands); err != nil {
 		log.Fatalf("Could not register application commands: %v", err)
 	}
+
+	go startDiscordWatchdog(dg)
 
 	log.Println("Bot is ready. Managing Minecraft server and lifecycles...")
 	sc := make(chan os.Signal, 1)
@@ -251,9 +252,6 @@ func main() {
 
 	stopBackupTicker()
 	stopLogStream()
-	for _, cmd := range registeredCommands {
-		_ = dg.ApplicationCommandDelete(dg.State.User.ID, GuildID, cmd.ID)
-	}
 }
 
 // updateSelfDDNS は Always Free インスタンスの自己修復 DDNS を実行します (alwaysfree.krmtn.org Proxied: true)
@@ -414,8 +412,124 @@ func getGCEExternalIP() (string, error) {
 	return strings.TrimSpace(string(body)), nil
 }
 
+// startDiscordWatchdog monitors Discord Gateway connectivity and exits if reconnection repeatedly fails,
+// allowing systemd (Restart=always) to recover the daemon cleanly.
+func startDiscordWatchdog(dg *discordgo.Session) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	consecutiveFailures := 0
+	for range ticker.C {
+		healthy := dg != nil && dg.DataReady
+		if healthy {
+			if _, err := dg.User("@me"); err != nil {
+				healthy = false
+			}
+		}
+
+		if healthy {
+			consecutiveFailures = 0
+			continue
+		}
+
+		consecutiveFailures++
+		log.Printf("Discord Gateway check failed (%d/3): attempting reconnect...", consecutiveFailures)
+		_ = dg.Close()
+		if err := dg.Open(); err != nil {
+			log.Printf("Discord Gateway reconnect error (%d/3): %v", consecutiveFailures, err)
+			if consecutiveFailures >= 3 {
+				log.Fatalf("Discord Gateway remained disconnected for 3 consecutive checks; exiting for systemd restart")
+			}
+		} else {
+			log.Println("Discord Gateway reconnected")
+			consecutiveFailures = 0
+		}
+	}
+}
+
+// getGCEMetadataAccessToken retrieves an OAuth2 access token from the GCE metadata server.
+func getGCEMetadataAccessToken(ctx context.Context, metadataBaseURL string) (string, error) {
+	url := strings.TrimRight(metadataBaseURL, "/") + "/computeMetadata/v1/instance/service-accounts/default/token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("metadata token status %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", err
+	}
+	if payload.AccessToken == "" {
+		return "", fmt.Errorf("empty access_token in metadata response")
+	}
+	return payload.AccessToken, nil
+}
+
+// fetchGCEInstanceStatusAndIP queries Compute Engine v1 REST API directly without spawning gcloud subprocesses.
+func fetchGCEInstanceStatusAndIP(ctx context.Context, computeBaseURL, token, project, zone, instance string) (string, string, error) {
+	url := fmt.Sprintf("%s/compute/v1/projects/%s/zones/%s/instances/%s",
+		strings.TrimRight(computeBaseURL, "/"), project, zone, instance)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("compute API status %d", resp.StatusCode)
+	}
+
+	var inst struct {
+		Status            string `json:"status"`
+		NetworkInterfaces []struct {
+			AccessConfigs []struct {
+				NatIP string `json:"natIP"`
+			} `json:"accessConfigs"`
+		} `json:"networkInterfaces"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&inst); err != nil {
+		return "", "", err
+	}
+
+	var natIP string
+	if len(inst.NetworkInterfaces) > 0 && len(inst.NetworkInterfaces[0].AccessConfigs) > 0 {
+		natIP = inst.NetworkInterfaces[0].AccessConfigs[0].NatIP
+	}
+	return inst.Status, natIP, nil
+}
+
 func getMinecraftInstanceIP() (string, error) {
-	cmd := exec.Command("gcloud", "compute", "instances", "describe", InstanceName,
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if token, err := getGCEMetadataAccessToken(ctx, "http://metadata.google.internal"); err == nil {
+		if _, ip, err := fetchGCEInstanceStatusAndIP(ctx, "https://compute.googleapis.com", token, GCPProjectID, Zone, InstanceName); err == nil && ip != "" {
+			return ip, nil
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, "gcloud", "compute", "instances", "describe", InstanceName,
 		"--zone="+Zone, "--format=get(networkInterfaces[0].accessConfigs[0].natIP)")
 	out, err := cmd.Output()
 	if err != nil {
@@ -446,14 +560,24 @@ func manageStreamLifecycle(dg *discordgo.Session) {
 			return
 		default:
 			if isGCEInstanceRunning() {
-				syncOnlinePlayersDirect()
+				syncOnlinePlayersDirect(dg)
 				log.Println("【ストリーム開始】ログ監視ストリームを確立します")
 				err := startLogStreamProcess(ctx, dg)
 				if err != nil {
 					log.Printf("ストリーム切断: %v。5秒後に再接続します", err)
 				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Second):
+				}
+			} else {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(30 * time.Second):
+				}
 			}
-			time.Sleep(5 * time.Second)
 		}
 	}
 }
@@ -520,6 +644,31 @@ func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 	return nil
 }
 
+// triggerEmptyServerTimerLocked starts the 10-minute unattended auto-shutdown timer when CurrentPlayers is 0.
+// Caller must hold PlayersMutex.
+func triggerEmptyServerTimerLocked(dg *discordgo.Session) {
+	if CurrentPlayers == 0 && !isTimerActive {
+		isTimerActive = true
+		emptyStartTime = time.Now()
+		if dg != nil && NotificationChannel != "" {
+			_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー数が0人になりました。10分後に自動停止します。")
+		}
+
+		go func(startTime time.Time) {
+			time.Sleep(10 * time.Minute)
+			PlayersMutex.Lock()
+			if isTimerActive && emptyStartTime.Equal(startTime) {
+				if dg != nil && NotificationChannel != "" {
+					_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー0人の状態が10分継続したため、自動シャットダウンを実行します。")
+				}
+				executeOfflineBackupSequence(dg)
+				isTimerActive = false
+			}
+			PlayersMutex.Unlock()
+		}(emptyStartTime)
+	}
+}
+
 func handleLogLineEvents(dg *discordgo.Session, line string) {
 	if NotificationChannel == "" {
 		return
@@ -542,23 +691,7 @@ func handleLogLineEvents(dg *discordgo.Session, line string) {
 		if CurrentPlayers < 0 {
 			CurrentPlayers = 0
 		}
-
-		if CurrentPlayers == 0 && !isTimerActive {
-			isTimerActive = true
-			emptyStartTime = time.Now()
-			_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー数が0人になりました。10分後に自動停止します。")
-
-			go func(startTime time.Time) {
-				time.Sleep(10 * time.Minute)
-				PlayersMutex.Lock()
-				if isTimerActive && emptyStartTime.Equal(startTime) {
-					_, _ = dg.ChannelMessageSend(NotificationChannel, "プレイヤー0人の状態が10分継続したため、自動シャットダウンを実行します。")
-					executeOfflineBackupSequence(dg)
-					isTimerActive = false
-				}
-				PlayersMutex.Unlock()
-			}(emptyStartTime)
-		}
+		triggerEmptyServerTimerLocked(dg)
 		PlayersMutex.Unlock()
 		_, _ = dg.ChannelMessageSend(NotificationChannel, fmt.Sprintf("📤 プレイヤー **%s** が退出しました。", player))
 		return
@@ -655,7 +788,9 @@ tar -czf - "$TARGET_DIR" | gcloud storage cp - gs://%s-minecraft-backup/world-da
 EOF`, GCPProjectID)
 	_, _ = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
 
-	_ = exec.Command("gcloud", "compute", "instances", "stop", InstanceName, "--zone="+Zone, "--quiet").Run()
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer stopCancel()
+	_ = exec.CommandContext(stopCtx, "gcloud", "compute", "instances", "stop", InstanceName, "--zone="+Zone, "--quiet").Run()
 	if NotificationChannel != "" {
 		_, _ = dg.ChannelMessageSend(NotificationChannel, "マインクラフトサーバーは正常に停止し、インスタンスは停止状態になりました。")
 	}
@@ -700,7 +835,16 @@ func executeRemoteCommandWithTimeout(commandLine string, timeout time.Duration) 
 }
 
 func isGCEInstanceRunning() bool {
-	cmd := exec.Command("gcloud", "compute", "instances", "describe", InstanceName,
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if token, err := getGCEMetadataAccessToken(ctx, "http://metadata.google.internal"); err == nil {
+		if status, _, err := fetchGCEInstanceStatusAndIP(ctx, "https://compute.googleapis.com", token, GCPProjectID, Zone, InstanceName); err == nil {
+			return status == "RUNNING"
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, "gcloud", "compute", "instances", "describe", InstanceName,
 		"--zone="+Zone, "--format=get(status)")
 	out, err := cmd.Output()
 	if err != nil {
@@ -709,7 +853,7 @@ func isGCEInstanceRunning() bool {
 	return strings.TrimSpace(string(out)) == "RUNNING"
 }
 
-func syncOnlinePlayersDirect() {
+func syncOnlinePlayersDirect(dg *discordgo.Session) {
 	_, err := executeRemoteCommandGetStdout("sudo docker exec minecraft-bedrock send-command list")
 	if err != nil {
 		return
@@ -729,6 +873,8 @@ func syncOnlinePlayersDirect() {
 			CurrentPlayers = count
 			if count > 0 {
 				isTimerActive = false
+			} else {
+				triggerEmptyServerTimerLocked(dg)
 			}
 			PlayersMutex.Unlock()
 			log.Printf("【同期完了】インメモリオンラインプレイヤー数を実態（%d人）に補正しました", count)
@@ -908,7 +1054,9 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			Data: &discordgo.InteractionResponseData{Content: "🚀 サーバー起動要求を送信しました。DNS の更新と反映確認を行っています..."},
 		})
 		go func() {
-			cmdStart := exec.Command("gcloud", "compute", "instances", "start", InstanceName, "--zone="+Zone, "--quiet")
+			startCtx, startCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer startCancel()
+			cmdStart := exec.CommandContext(startCtx, "gcloud", "compute", "instances", "start", InstanceName, "--zone="+Zone, "--quiet")
 			if err := cmdStart.Run(); err != nil {
 				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("❌ GCE 起動失敗: %v", err))
 				return

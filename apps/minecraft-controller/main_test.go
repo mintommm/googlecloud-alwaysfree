@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -316,3 +317,76 @@ worlds:
 		}
 	})
 }
+
+// 8. Compute Engine v1 REST API status and natIP parsing test
+func TestFetchGCEInstanceStatusAndIPMock(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/computeMetadata/v1/instance/service-accounts/default/token":
+			if r.Header.Get("Metadata-Flavor") != "Google" {
+				http.Error(w, "missing Metadata-Flavor", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"mock-oauth2-token","token_type":"Bearer"}`))
+		case "/compute/v1/projects/test-proj/zones/asia-northeast1-a/instances/minecraft01":
+			if r.Header.Get("Authorization") != "Bearer mock-oauth2-token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"status": "RUNNING",
+				"networkInterfaces": [
+					{
+						"accessConfigs": [
+							{"natIP": "34.85.100.200"}
+						]
+					}
+				]
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	token, err := getGCEMetadataAccessToken(ctx, mockServer.URL)
+	if err != nil {
+		t.Fatalf("getGCEMetadataAccessToken() error: %v", err)
+	}
+	if token != "mock-oauth2-token" {
+		t.Errorf("token = %q, want %q", token, "mock-oauth2-token")
+	}
+
+	status, ip, err := fetchGCEInstanceStatusAndIP(ctx, mockServer.URL, token, "test-proj", "asia-northeast1-a", "minecraft01")
+	if err != nil {
+		t.Fatalf("fetchGCEInstanceStatusAndIP() error: %v", err)
+	}
+	if status != "RUNNING" {
+		t.Errorf("status = %q, want %q", status, "RUNNING")
+	}
+	if ip != "34.85.100.200" {
+		t.Errorf("ip = %q, want %q", ip, "34.85.100.200")
+	}
+}
+
+// 9. Auto-shutdown timer state transition on 0-player sync test
+func TestTriggerEmptyServerTimer(t *testing.T) {
+	PlayersMutex.Lock()
+	CurrentPlayers = 0
+	isTimerActive = false
+	triggerEmptyServerTimerLocked(nil)
+	activeAfterZeroSync := isTimerActive
+	// Reset timer state so background sleep goroutine becomes a no-op
+	isTimerActive = false
+	PlayersMutex.Unlock()
+
+	if !activeAfterZeroSync {
+		t.Errorf("expected isTimerActive to be true when CurrentPlayers == 0")
+	}
+}
+

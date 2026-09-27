@@ -20,6 +20,11 @@ resource "google_compute_instance" "minecraft01" {
     }
   }
 
+  service_account {
+    email  = "381098905316-compute@developer.gserviceaccount.com"
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+
   metadata = {
     enable-oslogin = "FALSE"
     ssh-keys       = var.bot_ssh_public_key != "" ? "bot:${var.bot_ssh_public_key}" : ""

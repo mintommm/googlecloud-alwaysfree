@@ -3,9 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFRA_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${INFRA_DIR}/.." && pwd)"
 
 # 安全な公式イメージとバージョンの完全固定 (タイポスクワッティング・偽イメージ防止)
-TF_IMAGE="docker.io/hashicorp/terraform:1.10.4"
+TF_IMAGE="docker.io/hashicorp/terraform:1.11.4"
 
 echo "========================================================"
 echo " Running Terraform Quality Gate via Rootless Podman"
@@ -15,16 +16,16 @@ echo "========================================================"
 
 if command -v podman &> /dev/null; then
     echo "▶ 1. Checking HCL2 format (fmt -check)..."
-    podman run --rm -v "${INFRA_DIR}:/workspace:ro" -w /workspace "${TF_IMAGE}" fmt -check
+    podman run --rm -v "${REPO_ROOT}:/workspace:ro" -w /workspace/infrastructure "${TF_IMAGE}" fmt -check
 
     echo "▶ 2. Initializing stateless provider schema (init -backend=false)..."
-    podman run --rm -v "${INFRA_DIR}:/workspace" -w /workspace "${TF_IMAGE}" init -backend=false -no-color
+    podman run --rm -v "${REPO_ROOT}:/workspace" -w /workspace/infrastructure "${TF_IMAGE}" init -backend=false -no-color
 
     echo "▶ 3. Validating provider schema & syntax (validate)..."
-    podman run --rm -v "${INFRA_DIR}:/workspace" -w /workspace "${TF_IMAGE}" validate -no-color
+    podman run --rm -v "${REPO_ROOT}:/workspace" -w /workspace/infrastructure "${TF_IMAGE}" validate -no-color
 
     echo "▶ 4. Running native unit assertions (test)..."
-    podman run --rm -v "${INFRA_DIR}:/workspace" -w /workspace "${TF_IMAGE}" test -no-color "$@"
+    podman run --rm -v "${REPO_ROOT}:/workspace" -w /workspace/infrastructure "${TF_IMAGE}" test -no-color "$@"
 elif command -v terraform &> /dev/null || command -v terraform.exe &> /dev/null; then
     TF_CMD="terraform"
     if ! command -v terraform &> /dev/null; then

@@ -61,4 +61,9 @@ run "verify_minecraft01_ssh_metadata" {
     condition     = google_compute_instance.minecraft01.metadata["ssh-keys"] == "bot:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockBotKey"
     error_message = "minecraft01 の ssh-keys に公開鍵が設定されていません"
   }
+
+  assert {
+    condition     = contains(google_compute_instance.minecraft01.service_account[0].scopes, "https://www.googleapis.com/auth/cloud-platform")
+    error_message = "minecraft01 に cloud-platform スコープの service_account が設定されていません"
+  }
 }
