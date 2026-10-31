@@ -1,30 +1,44 @@
 #!/bin/bash
 set -euo pipefail
 
-# 1. 内部ファイアウォール（iptables）の通信許可（19132/udp のみ許可）
+# Container-Optimized OS host iptables drops incoming UDP by default even when VPC firewall allows 19132/udp.
 /sbin/iptables -C INPUT -p udp --dport 19132 -j ACCEPT 2>/dev/null || /sbin/iptables -I INPUT 1 -p udp --dport 19132 -j ACCEPT
 
-# 2. ホストOS上にステージング領域を確保
 mkdir -p /var/minecraft/staging
 chmod 777 /var/minecraft/staging
 
-# 3. 同名コンテナが既に存在する場合はクリーンアップ
 CONTAINER_NAME="minecraft-bedrock"
 docker stop $CONTAINER_NAME || true
 docker rm $CONTAINER_NAME || true
 
-# 4. ボリューム消失時の自動ディザスタリカバリ (GCS から最新バックアップを取得)
-# ボリューム内に worlds/kiseki が存在しない場合のみ GCS からダウンロード
-docker run --rm -v minecraft-data:/data google/cloud-sdk:alpine sh -c '
-if [ ! -d "/data/worlds/kiseki" ]; then
-    echo "ワールドデータが見つかりません。GCS から自動リストアを試行します..."
+# itzg/minecraft-bedrock-server overwrites server.properties on every start with LEVEL_NAME (default "Bedrock level") and LEVEL_SEED.
+# Read the persisted values first so container recreation preserves the active world and seed.
+ACTIVE_WORLD=$(docker run --rm -v minecraft-data:/data:ro alpine sh -c '
+if [ -f /data/server.properties ]; then
+    grep "^level-name=" /data/server.properties | tail -n 1 | cut -d= -f2- | tr -d "\r[:space:]"
+fi
+' 2>/dev/null || true)
+
+if ! printf '%s' "$ACTIVE_WORLD" | grep -Eq '^[a-zA-Z0-9_-]+$'; then
+    ACTIVE_WORLD="kiseki"
+fi
+
+ACTIVE_SEED=$(docker run --rm -v minecraft-data:/data:ro alpine sh -c '
+if [ -f /data/server.properties ]; then
+    grep "^level-seed=" /data/server.properties | tail -n 1 | cut -d= -f2- | tr -d "\r\n"
+fi
+' 2>/dev/null || true)
+
+docker run --rm -e ACTIVE_WORLD="$ACTIVE_WORLD" -v minecraft-data:/data google/cloud-sdk:alpine sh -c '
+if [ ! -d "/data/worlds/$ACTIVE_WORLD" ]; then
+    echo "ワールドデータ ($ACTIVE_WORLD) が見つかりません。GCS から自動リストアを試行します..."
     BUCKET="gs://$(gcloud config get-value project)-minecraft-backup"
-    gcloud storage cp $BUCKET/world-data-kiseki.tar.gz /tmp/world.tar.gz --quiet || true
+    gcloud storage cp "$BUCKET/world-data-$ACTIVE_WORLD.tar.gz" /tmp/world.tar.gz --quiet || true
     if [ -f "/tmp/world.tar.gz" ]; then
         mkdir -p /data/worlds && cd /data/worlds && tar -xzf /tmp/world.tar.gz && rm -f /tmp/world.tar.gz
         echo "GCS からの自動リストア (.tar.gz) が完了しました。"
     else
-        gcloud storage cp $BUCKET/world-data-kiseki.tar.xz /tmp/world.tar.xz --quiet || true
+        gcloud storage cp "$BUCKET/world-data-$ACTIVE_WORLD.tar.xz" /tmp/world.tar.xz --quiet || true
         if [ -f "/tmp/world.tar.xz" ]; then
             mkdir -p /data/worlds && cd /data/worlds && tar -xf /tmp/world.tar.xz && rm -f /tmp/world.tar.xz
             echo "GCS からの自動リストア (.tar.xz) が完了しました。"
@@ -33,9 +47,7 @@ if [ ! -d "/data/worlds/kiseki" ]; then
 fi
 ' || true
 
-# 5. 名前付きボリューム（minecraft-data）を使用したコンテナの起動
-# 標準入力インジェクションを有効化するため「-i」フラグを付与
-# ログ容量制限 (max-size=30m, max-file=3) を付与
+# -i keeps stdin open, which is required for docker exec send-command console injection.
 docker run -d -i \
     --name=$CONTAINER_NAME \
     --restart=always \
@@ -46,5 +58,6 @@ docker run -d -i \
     -e EULA=TRUE \
     -e ALLOW_LIST=true \
     -e ALLOW_LIST_USERS="${allow_list_users}" \
-    -e LEVEL_NAME="kiseki" \
+    -e LEVEL_NAME="$ACTIVE_WORLD" \
+    -e LEVEL_SEED="$ACTIVE_SEED" \
     itzg/minecraft-bedrock-server:latest

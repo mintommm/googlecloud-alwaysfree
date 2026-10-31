@@ -43,15 +43,16 @@ var (
 )
 
 var (
-	CurrentPlayers  = 0
-	PlayersMutex    sync.Mutex
-	isTimerActive   = false
-	emptyStartTime  time.Time
-	streamCancel    context.CancelFunc
-	streamMu        sync.Mutex
-	tickerCancel    context.CancelFunc
-	tickerMu        sync.Mutex
-	jstLocation     *time.Location
+	CurrentPlayers = 0
+	PlayersMutex   sync.Mutex
+	isTimerActive  = false
+	emptyStartTime time.Time
+	streamCancel   context.CancelFunc
+	streamMu       sync.Mutex
+	tickerCancel   context.CancelFunc
+	tickerMu       sync.Mutex
+	gitOpsMu       sync.Mutex
+	jstLocation    *time.Location
 )
 
 var (
@@ -59,23 +60,56 @@ var (
 	regexPlayerLeft   = regexp.MustCompile(`Player disconnected:\s+([^,]+)`)
 	regexListCount    = regexp.MustCompile(`There are (\d+)/\d+ players online`)
 	regexDockerPrefix = regexp.MustCompile(`^(?:[0-9T:.\-+]+Z?\s+)?(?:stdout|stderr):\s*(.*)$`)
+	regexValidWorldID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	// Bedrock level-seed is a signed 64-bit integer; an empty value means "random".
+	regexValidWorldSeed = regexp.MustCompile(`^-?[0-9]*$`)
 )
 
-type WorldConfig struct {
-	Defaults struct {
-		Settings map[string]interface{} `yaml:"settings"`
-	} `yaml:"defaults"`
-	Worlds []struct {
-		ID       string                 `yaml:"id"`
-		Name     string                 `yaml:"name"`
-		Emoji    string                 `yaml:"emoji"`
-		Settings map[string]interface{} `yaml:"settings"`
-	} `yaml:"worlds"`
+const (
+	ConfigRepoDir = "/opt/minecraft-controller/config-repo"
+)
+
+type WorldEntry struct {
+	ID       string                 `yaml:"id"`
+	Name     string                 `yaml:"name"`
+	Emoji    string                 `yaml:"emoji"`
+	Settings map[string]interface{} `yaml:"settings"`
 }
 
-// reconcileWorldConfig は defaults.settings を基準にアクティブワールドの設定を事前検証・マージし、
-// Minecraft コマンドリストを生成します。
-func reconcileWorldConfig(yamlBytes []byte, activeWorldID string) ([]string, error) {
+type WorldConfig struct {
+	ActiveWorld string `yaml:"active_world"`
+	Defaults    struct {
+		Settings map[string]interface{} `yaml:"settings"`
+	} `yaml:"defaults"`
+	Worlds []WorldEntry `yaml:"worlds"`
+}
+
+type ResolvedWorldConfig struct {
+	ID       string
+	Name     string
+	Emoji    string
+	Seed     string
+	Commands []string
+}
+
+func (w *ResolvedWorldConfig) DisplayLabel() string {
+	if w == nil {
+		return "kiseki"
+	}
+	var parts []string
+	if strings.TrimSpace(w.Emoji) != "" {
+		parts = append(parts, strings.TrimSpace(w.Emoji))
+	}
+	if strings.TrimSpace(w.Name) != "" {
+		parts = append(parts, strings.TrimSpace(w.Name))
+	}
+	if len(parts) == 0 {
+		return w.ID
+	}
+	return fmt.Sprintf("%s (`%s`)", strings.Join(parts, " "), w.ID)
+}
+
+func parseWorldConfig(yamlBytes []byte) (*WorldConfig, error) {
 	var config WorldConfig
 	if err := yaml.Unmarshal(yamlBytes, &config); err != nil {
 		return nil, fmt.Errorf("worlds.yaml パースエラー: %w", err)
@@ -89,25 +123,41 @@ func reconcileWorldConfig(yamlBytes []byte, activeWorldID string) ([]string, err
 		return nil, fmt.Errorf("defaults.settings が定義されていません")
 	}
 
-	var targetWorld *struct {
-		ID       string                 `yaml:"id"`
-		Name     string                 `yaml:"name"`
-		Emoji    string                 `yaml:"emoji"`
-		Settings map[string]interface{} `yaml:"settings"`
-	}
-
-	for i := range config.Worlds {
-		if config.Worlds[i].ID == activeWorldID {
-			targetWorld = &config.Worlds[i]
-			break
+	for _, w := range config.Worlds {
+		if !regexValidWorldID.MatchString(w.ID) {
+			return nil, fmt.Errorf("不正なワールドID形式です: %q", w.ID)
 		}
 	}
 
-	if targetWorld == nil {
-		targetWorld = &config.Worlds[0]
+	config.ActiveWorld = strings.TrimSpace(config.ActiveWorld)
+	if config.ActiveWorld == "" {
+		return nil, fmt.Errorf("active_world が定義されていません")
+	}
+	if config.findWorld(config.ActiveWorld) == nil {
+		return nil, fmt.Errorf("active_world %q が worlds に定義されていません", config.ActiveWorld)
 	}
 
-	// 1. targetWorld の settings にあるキーが defaults.settings に存在するか検証
+	return &config, nil
+}
+
+func (c *WorldConfig) findWorld(id string) *WorldEntry {
+	for i := range c.Worlds {
+		if c.Worlds[i].ID == id {
+			return &c.Worlds[i]
+		}
+	}
+	return nil
+}
+
+func resolveWorldConfig(yamlBytes []byte) (*ResolvedWorldConfig, error) {
+	config, err := parseWorldConfig(yamlBytes)
+	if err != nil {
+		return nil, err
+	}
+	targetWorld := config.findWorld(config.ActiveWorld)
+
+	// Require every world setting key (except seed) to have a baseline in defaults.settings
+	// so removed keys revert to defaults instead of drifting in level.dat.
 	var missingKeys []string
 	for key := range targetWorld.Settings {
 		if key == "seed" {
@@ -123,18 +173,21 @@ func reconcileWorldConfig(yamlBytes []byte, activeWorldID string) ([]string, err
 		return nil, fmt.Errorf("defaults.settings に未定義のキーが存在します: %s", strings.Join(missingKeys, ", "))
 	}
 
-	// 2. defaults.settings をベースに targetWorld.Settings で上書きマージ
 	mergedSettings := make(map[string]interface{})
 	for k, v := range config.Defaults.Settings {
 		mergedSettings[k] = v
 	}
+	var seedStr string
 	for k, v := range targetWorld.Settings {
-		if k != "seed" {
-			mergedSettings[k] = v
+		if k == "seed" {
+			if v != nil {
+				seedStr = strings.TrimSpace(fmt.Sprintf("%v", v))
+			}
+			continue
 		}
+		mergedSettings[k] = v
 	}
 
-	// 3. Minecraft コマンドの生成 (安定した実行順序のためソート)
 	var cmds []string
 	var keys []string
 	for k := range mergedSettings {
@@ -151,7 +204,13 @@ func reconcileWorldConfig(yamlBytes []byte, activeWorldID string) ([]string, err
 		}
 	}
 
-	return cmds, nil
+	return &ResolvedWorldConfig{
+		ID:       targetWorld.ID,
+		Name:     targetWorld.Name,
+		Emoji:    targetWorld.Emoji,
+		Seed:     seedStr,
+		Commands: cmds,
+	}, nil
 }
 
 func init() {
@@ -177,10 +236,7 @@ func main() {
 		GCPProjectID = "mintommm-alwaysfree-gce"
 	}
 
-	// 1. 起動時自己修復 DDNS (alwaysfree.krmtn.org Proxied: true)
 	go updateSelfDDNS()
-
-	// 2. Webhook サーバー起動 (:8080)
 	go startWebhookServer()
 
 	dg, err := discordgo.New("Bot " + Token)
@@ -254,7 +310,7 @@ func main() {
 	stopLogStream()
 }
 
-// updateSelfDDNS は Always Free インスタンスの自己修復 DDNS を実行します (alwaysfree.krmtn.org Proxied: true)
+// Always Free GCE uses an ephemeral external IP to avoid static IP charges; Proxied=true terminates HTTPS at Cloudflare for GitHub Webhooks.
 func updateSelfDDNS() {
 	if CFAPIToken == "" || CFZoneID == "" {
 		log.Println("Cloudflare 設定が未指定のため自己修復 DDNS をスキップします")
@@ -317,7 +373,7 @@ func updateSelfDDNS() {
 	log.Printf("【自己修復 DDNS 完了】alwaysfree.krmtn.org -> %s (Proxied: true)", ip)
 }
 
-// updateMinecraftDNS は minecraft01 の起動時に minecraft.krmtn.org (Proxied: false) を更新します
+// Bedrock uses UDP 19132, which Cloudflare proxy does not forward on standard plans; Proxied=false routes traffic directly to the ephemeral IP.
 func updateMinecraftDNS(ip string) error {
 	if CFAPIToken == "" || CFZoneID == "" {
 		return nil
@@ -363,7 +419,7 @@ func updateMinecraftDNS(ip string) error {
 	return err
 }
 
-// waitForDNSPropagation は公開 DNS (1.1.1.1 / 8.8.8.8) で新 IP が解決できるまで待機します
+// Wait for public DNS resolvers to observe the new IP before notifying players, preventing connection failures caused by negative caching.
 func waitForDNSPropagation(expectedIP string, maxWait time.Duration) bool {
 	deadline := time.Now().Add(maxWait)
 	r := &net.Resolver{
@@ -412,8 +468,7 @@ func getGCEExternalIP() (string, error) {
 	return strings.TrimSpace(string(body)), nil
 }
 
-// startDiscordWatchdog monitors Discord Gateway connectivity and exits if reconnection repeatedly fails,
-// allowing systemd (Restart=always) to recover the daemon cleanly.
+// discordgo's internal reconnect can transiently drop DataReady; wait for 3 consecutive failures before forcing Close/Open or exiting for systemd recovery.
 func startDiscordWatchdog(dg *discordgo.Session) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -433,13 +488,16 @@ func startDiscordWatchdog(dg *discordgo.Session) {
 		}
 
 		consecutiveFailures++
-		log.Printf("Discord Gateway check failed (%d/3): attempting reconnect...", consecutiveFailures)
+		if consecutiveFailures < 3 {
+			log.Printf("Discord Gateway check failed (%d/3): waiting for native auto-reconnect...", consecutiveFailures)
+			continue
+		}
+
+		log.Printf("Discord Gateway check failed (%d/3): attempting explicit reconnect...", consecutiveFailures)
 		_ = dg.Close()
 		if err := dg.Open(); err != nil {
 			log.Printf("Discord Gateway reconnect error (%d/3): %v", consecutiveFailures, err)
-			if consecutiveFailures >= 3 {
-				log.Fatalf("Discord Gateway remained disconnected for 3 consecutive checks; exiting for systemd restart")
-			}
+			log.Fatalf("Discord Gateway remained disconnected for 3 consecutive checks; exiting for systemd restart")
 		} else {
 			log.Println("Discord Gateway reconnected")
 			consecutiveFailures = 0
@@ -447,7 +505,6 @@ func startDiscordWatchdog(dg *discordgo.Session) {
 	}
 }
 
-// getGCEMetadataAccessToken retrieves an OAuth2 access token from the GCE metadata server.
 func getGCEMetadataAccessToken(ctx context.Context, metadataBaseURL string) (string, error) {
 	url := strings.TrimRight(metadataBaseURL, "/") + "/computeMetadata/v1/instance/service-accounts/default/token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -479,7 +536,7 @@ func getGCEMetadataAccessToken(ctx context.Context, metadataBaseURL string) (str
 	return payload.AccessToken, nil
 }
 
-// fetchGCEInstanceStatusAndIP queries Compute Engine v1 REST API directly without spawning gcloud subprocesses.
+// Query Compute Engine REST API directly instead of spawning python-based gcloud subprocesses, which cause high CPU spikes on e2-micro.
 func fetchGCEInstanceStatusAndIP(ctx context.Context, computeBaseURL, token, project, zone, instance string) (string, string, error) {
 	url := fmt.Sprintf("%s/compute/v1/projects/%s/zones/%s/instances/%s",
 		strings.TrimRight(computeBaseURL, "/"), project, zone, instance)
@@ -560,9 +617,22 @@ func manageStreamLifecycle(dg *discordgo.Session) {
 			return
 		default:
 			if isGCEInstanceRunning() {
+				readyCtx, readyCancel := context.WithTimeout(ctx, 90*time.Second)
+				err := waitForBedrockServerReady(readyCtx, 3*time.Second, "")
+				readyCancel()
+				if err != nil {
+					log.Printf("ログストリーム待機中断 (コンテナ未準備): %v", err)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Second):
+					}
+					continue
+				}
+
 				syncOnlinePlayersDirect(dg)
 				log.Println("【ストリーム開始】ログ監視ストリームを確立します")
-				err := startLogStreamProcess(ctx, dg)
+				err = startLogStreamProcess(ctx, dg)
 				if err != nil {
 					log.Printf("ストリーム切断: %v。5秒後に再接続します", err)
 				}
@@ -644,7 +714,6 @@ func startLogStreamProcess(ctx context.Context, dg *discordgo.Session) error {
 	return nil
 }
 
-// triggerEmptyServerTimerLocked starts the 10-minute unattended auto-shutdown timer when CurrentPlayers is 0.
 // Caller must hold PlayersMutex.
 func triggerEmptyServerTimerLocked(dg *discordgo.Session) {
 	if CurrentPlayers == 0 && !isTimerActive {
@@ -716,7 +785,7 @@ func startBackupTicker(dg *discordgo.Session) {
 		case <-ticker.C:
 			if isGCEInstanceRunning() {
 				log.Println("【定期バックアップ開始】サイレントバックアップを実行します")
-				if err := executeOnlineBackupFlow(); err != nil {
+				if _, err := executeOnlineBackupFlow(); err != nil {
 					log.Printf("定期バックアップ失敗: %v", err)
 				}
 			}
@@ -735,64 +804,231 @@ func stopBackupTicker() {
 	tickerMu.Unlock()
 }
 
-func executeOnlineBackupFlow() error {
-	// 1. save hold
-	_, err := executeRemoteCommandWithTimeout("sudo docker exec minecraft-bedrock send-command \"save hold\"", 60*time.Second)
+func parseServerPropertiesLevelName(content string) string {
+	var levelName string
+	for _, rawLine := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "#") || !strings.HasPrefix(line, "level-name=") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(line, "level-name="))
+		if regexValidWorldID.MatchString(val) {
+			levelName = val
+		}
+	}
+	return levelName
+}
+
+// Read server.properties from the running container, or via a lightweight alpine mount if the container is currently stopped.
+func getServerPropertiesWorldID() string {
+	cmd := `sudo docker exec minecraft-bedrock sh -c 'cat /data/server.properties 2>/dev/null' 2>/dev/null || sudo docker run --rm -v minecraft-data:/data:ro alpine sh -c 'cat /data/server.properties 2>/dev/null' 2>/dev/null || true`
+	out, err := executeRemoteCommandWithTimeout(cmd, 15*time.Second)
 	if err != nil {
-		return fmt.Errorf("failed to send save hold: %w", err)
+		return ""
+	}
+	return parseServerPropertiesLevelName(out)
+}
+
+func loadResolvedWorld() (*ResolvedWorldConfig, error) {
+	yamlBytes, err := os.ReadFile(ConfigRepoDir + "/worlds.yaml")
+	if err != nil {
+		return nil, err
+	}
+	return resolveWorldConfig(yamlBytes)
+}
+
+// Prefer server.properties over worlds.yaml so backups target the world actually mounted on disk even before a pending world switch is applied.
+func resolveBackupTargetWorldID() string {
+	if propsID := getServerPropertiesWorldID(); propsID != "" {
+		return propsID
+	}
+	if resolved, err := loadResolvedWorld(); err == nil {
+		return resolved.ID
+	}
+	return "kiseki"
+}
+
+func buildWorldBackupScript(projectID, worldID string) (string, error) {
+	trimmedWorld := strings.TrimSpace(worldID)
+	if !regexValidWorldID.MatchString(trimmedWorld) {
+		return "", fmt.Errorf("不正なワールドID形式です: %q", worldID)
+	}
+	script := fmt.Sprintf(`sudo docker run --rm -i \
+		-e WORLD_ID=%q \
+		-v minecraft-data:/data:ro \
+		google/cloud-sdk:alpine sh -s << 'EOF'
+set -e
+cd /data/worlds
+if [ ! -d "$WORLD_ID" ]; then
+    echo "backup target directory not found: $WORLD_ID" >&2
+    exit 1
+fi
+tar -czf - "$WORLD_ID" | gcloud storage cp - "gs://%s-minecraft-backup/world-data-${WORLD_ID}.tar.gz" --quiet
+EOF`, trimmedWorld, projectID)
+	return script, nil
+}
+
+// Batch commands into a single SSH execution with 0.3s pacing to avoid per-command SSH handshake overhead and console stdin pipe contention.
+func buildBatchSendCommandScript(cmds []string) string {
+	var lines []string
+	lines = append(lines, "set -e")
+	for idx, cmdStr := range cmds {
+		if idx > 0 {
+			lines = append(lines, "sleep 0.3")
+		}
+		lines = append(lines, fmt.Sprintf("sudo docker exec minecraft-bedrock send-command %q", cmdStr))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// Wait for google-startup-scripts.service to finish first so commands are not sent to a stale --restart=always container that minecraft-startup.sh is about to stop and recreate.
+func checkBedrockServerReadyScript(expectedWorldID string) string {
+	worldCheck := ""
+	if strings.TrimSpace(expectedWorldID) != "" {
+		worldCheck = fmt.Sprintf(`
+CUR_WORLD=$(sudo docker exec minecraft-bedrock sh -c 'grep "^level-name=" /data/server.properties 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d "\r[:space:]"' 2>/dev/null || true)
+if [ "$CUR_WORLD" != %q ]; then
+    echo "WAITING:world_mismatch=$CUR_WORLD"
+    exit 0
+fi`, strings.TrimSpace(expectedWorldID))
+	}
+
+	return fmt.Sprintf(`STATE=$(systemctl show -p ActiveState --value google-startup-scripts.service 2>/dev/null || echo "unknown")
+MONO=$(systemctl show -p ExecMainStartTimestampMonotonic --value google-startup-scripts.service 2>/dev/null || echo "0")
+if [ "$STATE" != "inactive" ] || [ "${MONO:-0}" = "0" ]; then
+    echo "WAITING:startup_state=${STATE},mono=${MONO}"
+    exit 0
+fi
+RUNNING=$(sudo docker inspect -f '{{.State.Running}}' minecraft-bedrock 2>/dev/null || echo "false")
+if [ "$RUNNING" != "true" ]; then
+    echo "WAITING:container_running=${RUNNING}"
+    exit 0
+fi%s
+if sudo docker logs minecraft-bedrock 2>&1 | grep -q "Server started."; then
+    echo "READY"
+else
+    echo "WAITING:world_loading"
+fi`, worldCheck)
+}
+
+func waitForBedrockServerReadyWithRunner(ctx context.Context, pollInterval time.Duration, expectedWorldID string, runner func(string) (string, error)) error {
+	script := checkBedrockServerReadyScript(expectedWorldID)
+	var lastStatus string
+	for {
+		out, err := runner(script)
+		trimmed := strings.TrimSpace(out)
+		if err == nil && strings.Contains(trimmed, "READY") {
+			return nil
+		}
+		if err != nil {
+			lastStatus = err.Error()
+		} else {
+			lastStatus = trimmed
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("Bedrockサーバー準備待機タイムアウト (%s): %w", lastStatus, ctx.Err())
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func waitForBedrockServerReady(ctx context.Context, pollInterval time.Duration, expectedWorldID string) error {
+	return waitForBedrockServerReadyWithRunner(ctx, pollInterval, expectedWorldID, func(cmd string) (string, error) {
+		return executeRemoteCommandWithTimeout(cmd, 15*time.Second)
+	})
+}
+
+// Delegate container recreation and GCS restore to google_metadata_script_runner startup so world switching shares the exact same boot path as instance startup.
+func buildWorldSwitchScript(world *ResolvedWorldConfig) (string, error) {
+	if world == nil || !regexValidWorldID.MatchString(world.ID) {
+		return "", fmt.Errorf("不正なワールドIDです")
+	}
+	if !regexValidWorldSeed.MatchString(world.Seed) {
+		return "", fmt.Errorf("不正なシード値形式です: %q", world.Seed)
+	}
+	script := fmt.Sprintf(`set -e
+sudo docker run --rm -v minecraft-data:/data alpine sh -c 'sed -i -e "s/^level-name=.*/level-name=%s/" -e "s/^level-seed=.*/level-seed=%s/" /data/server.properties'
+sudo docker rm -f minecraft-bedrock || true
+sudo google_metadata_script_runner startup`, world.ID, world.Seed)
+	return script, nil
+}
+
+func switchWorldIfNeeded(world *ResolvedWorldConfig) (string, error) {
+	currentWorldID := getServerPropertiesWorldID()
+	if currentWorldID == world.ID {
+		return "", nil
+	}
+	log.Printf("【ワールド切り替え】%q -> %q", currentWorldID, world.ID)
+
+	_, _ = executeRemoteCommandWithTimeout("sudo docker stop -t 10 minecraft-bedrock || true", 60*time.Second)
+
+	// Abort the switch if backing up the previous world fails, preventing GCS from holding a stale archive when the world is later restored.
+	if currentWorldID != "" {
+		backupScript, err := buildWorldBackupScript(GCPProjectID, currentWorldID)
+		if err != nil {
+			return currentWorldID, err
+		}
+		if _, err := executeRemoteCommandWithTimeout(backupScript, 5*time.Minute); err != nil {
+			return currentWorldID, fmt.Errorf("切り替え前の旧ワールド (%s) バックアップに失敗したため切り替えを中断しました: %w", currentWorldID, err)
+		}
+		log.Printf("【旧ワールド退避完了】world-data-%s.tar.gz を GCS へ保存しました", currentWorldID)
+	}
+
+	switchScript, err := buildWorldSwitchScript(world)
+	if err != nil {
+		return currentWorldID, err
+	}
+	if _, err := executeRemoteCommandWithTimeout(switchScript, 5*time.Minute); err != nil {
+		return currentWorldID, fmt.Errorf("ワールド (%s) への切り替えに失敗しました: %w", world.ID, err)
+	}
+	return currentWorldID, nil
+}
+
+func executeOnlineBackupFlow() (string, error) {
+	worldID := resolveBackupTargetWorldID()
+	backupScript, err := buildWorldBackupScript(GCPProjectID, worldID)
+	if err != nil {
+		return "", err
+	}
+
+	// Freeze LevelDB compaction on disk during tar streaming so the archive snapshot is consistent.
+	_, err = executeRemoteCommandWithTimeout("sudo docker exec minecraft-bedrock send-command \"save hold\"", 60*time.Second)
+	if err != nil {
+		return worldID, fmt.Errorf("failed to send save hold: %w", err)
 	}
 
 	time.Sleep(3 * time.Second)
 
-	// 2. GCS バックアップスクリプト実行 (gzip 高速直接ストリーム + GCS アップロード)
-	backupScript := fmt.Sprintf(`sudo docker run --rm -i \
-		-v minecraft-data:/data:ro \
-		google/cloud-sdk:alpine sh -s << 'EOF'
-set -e
-cd /data/worlds
-TARGET_DIR="kiseki"
-if [ ! -d "kiseki" ] && [ -d "Kiseki" ]; then
-    TARGET_DIR="Kiseki"
-fi
-tar -czf - "$TARGET_DIR" | gcloud storage cp - gs://%s-minecraft-backup/world-data-kiseki.tar.gz --quiet
-EOF`, GCPProjectID)
-
 	_, err = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
-
-	// 3. save resume
 	_, _ = executeRemoteCommandWithTimeout("sudo docker exec minecraft-bedrock send-command \"save resume\"", 60*time.Second)
 
 	if err != nil {
-		return fmt.Errorf("GCS バックアップ失敗: %w", err)
+		return worldID, fmt.Errorf("GCS バックアップ失敗: %w", err)
 	}
 
-	log.Println("【バックアップ完了】gs://" + GCPProjectID + "-minecraft-backup/world-data-kiseki.tar.gz へ安全に退避しました")
-	return nil
+	log.Printf("【バックアップ完了】gs://%s-minecraft-backup/world-data-%s.tar.gz へ退避しました", GCPProjectID, worldID)
+	return worldID, nil
 }
 
 func executeOfflineBackupSequence(dg *discordgo.Session) {
+	worldID := resolveBackupTargetWorldID()
+
 	_, _ = executeRemoteCommandWithTimeout("sudo docker stop -t 10 minecraft-bedrock", 60*time.Second)
+	// Remove the container on shutdown so Docker's --restart=always does not briefly start the old container on next boot before minecraft-startup.sh runs.
+	_, _ = executeRemoteCommandWithTimeout("sudo docker rm -f minecraft-bedrock || true", 30*time.Second)
 	stopLogStream()
 
-	// 停止時最終バックアップ (gzip 高速直接ストリーム)
-	backupScript := fmt.Sprintf(`sudo docker run --rm -i \
-		-v minecraft-data:/data:ro \
-		google/cloud-sdk:alpine sh -s << 'EOF'
-set -e
-cd /data/worlds
-TARGET_DIR="kiseki"
-if [ ! -d "kiseki" ] && [ -d "Kiseki" ]; then
-    TARGET_DIR="Kiseki"
-fi
-tar -czf - "$TARGET_DIR" | gcloud storage cp - gs://%s-minecraft-backup/world-data-kiseki.tar.gz --quiet
-EOF`, GCPProjectID)
-	_, _ = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
+	if backupScript, err := buildWorldBackupScript(GCPProjectID, worldID); err == nil {
+		_, _ = executeRemoteCommandWithTimeout(backupScript, 5*time.Minute)
+	}
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer stopCancel()
 	_ = exec.CommandContext(stopCtx, "gcloud", "compute", "instances", "stop", InstanceName, "--zone="+Zone, "--quiet").Run()
-	if NotificationChannel != "" {
-		_, _ = dg.ChannelMessageSend(NotificationChannel, "マインクラフトサーバーは正常に停止し、インスタンスは停止状態になりました。")
+	if dg != nil && NotificationChannel != "" {
+		_, _ = dg.ChannelMessageSend(NotificationChannel, fmt.Sprintf("マインクラフトサーバー（ワールド: `%s`）は正常に停止し、インスタンスは停止状態になりました。", worldID))
 	}
 }
 
@@ -883,7 +1119,7 @@ func syncOnlinePlayersDirect(dg *discordgo.Session) {
 	}
 }
 
-// extractCleanLogMessage は Payload から純粋なログメッセージを安全に抽出します
+// Cloud Logging delivers GCE syslog entries as string textPayload and Docker/Fluentd entries as structured jsonPayload.
 func extractCleanLogMessage(payload interface{}) string {
 	var rawText string
 
@@ -910,7 +1146,6 @@ func extractCleanLogMessage(payload interface{}) string {
 	return trimmed
 }
 
-// handleCloudLogsCommand は Cloud Logging から透過的にログを取得して返信します
 func handleCloudLogsCommand(s *discordgo.Session, i *discordgo.InteractionCreate, lines int, keyword string) {
 	if lines <= 0 || lines > 30 {
 		lines = 15
@@ -959,7 +1194,7 @@ func handleCloudLogsCommand(s *discordgo.Session, i *discordgo.InteractionCreate
 			logs = append(logs, fmt.Sprintf("[%s] %s", timestamp, msg))
 		}
 
-		// 新しい順から古い順に反転
+		// logadmin.NewestFirst() fetches the most recent N entries; reverse them to display in chronological order.
 		for l, r := 0, len(logs)-1; l < r; l, r = l+1, r-1 {
 			logs[l], logs[r] = logs[r], logs[l]
 		}
@@ -981,7 +1216,7 @@ func handleCloudLogsCommand(s *discordgo.Session, i *discordgo.InteractionCreate
 				{
 					Title:       title,
 					Description: fmt.Sprintf("```log\n%s\n```", logBlock),
-					Color:       0x3498db, // 青色
+					Color:       0x3498db,
 					Footer: &discordgo.MessageEmbedFooter{
 						Text: "Cloud Logging API | 全ログは GCP コンソールで検索可能",
 					},
@@ -1051,7 +1286,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case "start":
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Content: "🚀 サーバー起動要求を送信しました。DNS の更新と反映確認を行っています..."},
+			Data: &discordgo.InteractionResponseData{Content: "🚀 サーバー起動要求を送信しました。DNS更新およびワールド準備・ルール適用を行っています..."},
 		})
 		go func() {
 			startCtx, startCancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -1068,21 +1303,29 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				return
 			}
 
-			// Cloudflare DNS 更新
 			if err := updateMinecraftDNS(ip); err != nil {
 				log.Printf("minecraft.krmtn.org 更新エラー: %v", err)
 			}
 
-			// 公開 DNS での反映確認
 			propagated := waitForDNSPropagation(ip, 30*time.Second)
 			statusNote := "DNS 反映完了 ✅"
 			if !propagated {
 				statusNote = "DNS 伝播中 (数分かかる場合があります) ⏳"
 			}
 
-			msg := fmt.Sprintf("%s 🟢 **マインクラフトサーバーの起動が完了しました！**\nサーバーアドレス: `minecraft.krmtn.org`\nIPアドレス: `%s` (%s)", callerMention, ip, statusNote)
+			resolvedWorld, gitOpsErr := applyGitOpsChanges()
+			worldLabel := "kiseki"
+			if resolvedWorld != nil {
+				worldLabel = resolvedWorld.DisplayLabel()
+			}
+			ruleNote := "ワールドルール適用完了 ✅"
+			if gitOpsErr != nil {
+				ruleNote = fmt.Sprintf("ワールドルール適用エラー ⚠️ (%v)", gitOpsErr)
+			}
+
+			msg := fmt.Sprintf("%s 🟢 **マインクラフトサーバーの起動が完了しました！**\nワールド: %s (%s)\nサーバーアドレス: `minecraft.krmtn.org`\nIPアドレス: `%s` (%s)",
+				callerMention, worldLabel, ruleNote, ip, statusNote)
 			_, _ = s.ChannelMessageSend(i.ChannelID, msg)
-			go applyGitOpsChanges()
 			go manageStreamLifecycle(s)
 		}()
 
@@ -1101,14 +1344,18 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			Data: &discordgo.InteractionResponseData{Content: "現在のサーバー状態を確認中..."},
 		})
 		go func() {
+			worldLabel := "kiseki"
+			if resolved, err := loadResolvedWorld(); err == nil {
+				worldLabel = resolved.DisplayLabel()
+			}
 			if !isGCEInstanceRunning() {
-				_, _ = s.ChannelMessageSend(i.ChannelID, "🔴 GCEインスタンス状態: **TERMINATED** (停止中)")
+				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("🔴 GCEインスタンス状態: **TERMINATED** (停止中)\n🗺️ 設定ワールド: %s", worldLabel))
 				return
 			}
 			PlayersMutex.Lock()
 			count := CurrentPlayers
 			PlayersMutex.Unlock()
-			_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("🟢 GCEインスタンス状態: **RUNNING** (稼働中)\n👥 オンラインプレイヤー数: **%d人**", count))
+			_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("🟢 GCEインスタンス状態: **RUNNING** (稼働中)\n🗺️ 有効ワールド: %s\n👥 オンラインプレイヤー数: **%d人**", worldLabel, count))
 		}()
 
 	case "cmd":
@@ -1140,7 +1387,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 							{
 								Title:       "💻 コマンド送信失敗",
 								Description: fmt.Sprintf("実行者: %s\nコマンド: `%s`\nステータス: ❌ 送信失敗 (%v)", callerMention, cleanCmd, err),
-								Color:       0xe74c3c, // 赤色
+								Color:       0xe74c3c,
 							},
 						},
 					},
@@ -1155,7 +1402,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 						{
 							Title:       "💻 コマンド送信完了",
 							Description: fmt.Sprintf("実行者: %s\nコマンド: `%s`\nステータス: ✅ サーバーへ正常に送信されました", callerMention, cleanCmd),
-							Color:       0x3498db, // 青色
+							Color:       0x3498db,
 						},
 					},
 				},
@@ -1179,24 +1426,23 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case "backup":
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Content: "💾 即時バックアップを開始します..."},
+			Data: &discordgo.InteractionResponseData{Content: "💾 バックアップを開始します..."},
 		})
 		go func() {
 			if !isGCEInstanceRunning() {
 				_, _ = s.ChannelMessageSend(i.ChannelID, "❌ サーバーが停止しているためバックアップを実行できません。")
 				return
 			}
-			err := executeOnlineBackupFlow()
+			worldID, err := executeOnlineBackupFlow()
 			if err != nil {
 				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("❌ バックアップ失敗: %v", err))
 				return
 			}
-			_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("✅ **手動バックアップ完了**\n最新ワールドデータ (`world-data-kiseki.tar.xz`) を GCS (`gs://%s-minecraft-backup`) へ保存しました。", GCPProjectID))
+			_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("✅ **手動バックアップ完了**\n最新ワールドデータ (`world-data-%s.tar.gz`) を GCS (`gs://%s-minecraft-backup`) へ保存しました。", worldID, GCPProjectID))
 		}()
 	}
 }
 
-// startWebhookServer は GitHub からの Webhook をリッスンし、設定変更を即時反映します (:8080/webhook)
 func startWebhookServer() {
 	http.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1220,7 +1466,7 @@ func startWebhookServer() {
 
 		go func() {
 			log.Println("【Webhook 受信】設定リポジトリの更新を検知しました。Hot Reload を実行します")
-			applyGitOpsChanges()
+			_, _ = applyGitOpsChanges()
 		}()
 
 		w.WriteHeader(http.StatusOK)
@@ -1248,62 +1494,95 @@ func verifyHMACSignature(body []byte, signature, secret string) bool {
 	return hmac.Equal([]byte(signature), []byte(expectedSig))
 }
 
-func applyGitOpsChanges() {
-	// 1. ローカル設定リポジトリで git pull
-	repoDir := "/opt/minecraft-controller/config-repo"
-	_ = exec.Command("git", "-C", repoDir, "pull", "origin", "main").Run()
+func applyGitOpsChanges() (*ResolvedWorldConfig, error) {
+	gitOpsMu.Lock()
+	defer gitOpsMu.Unlock()
 
-	// 2. worlds.yaml のパースと事前検証
+	repoDir := ConfigRepoDir
+
+	if out, err := exec.Command("git", "-C", repoDir, "pull", "origin", "main").CombinedOutput(); err != nil {
+		log.Printf("git pull 警告: %v (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+
 	yamlBytes, err := os.ReadFile(repoDir + "/worlds.yaml")
 	if err != nil {
 		log.Printf("worlds.yaml 読み取り失敗: %v", err)
 		notifyGitOpsError(fmt.Sprintf("`worlds.yaml` の読み取りに失敗しました: %v", err))
-		return
+		return nil, err
 	}
 
-	activeWorld := os.Getenv("MC_LEVEL_NAME")
-	if activeWorld == "" {
-		activeWorld = "kiseki"
-	}
-
-	cmds, err := reconcileWorldConfig(yamlBytes, activeWorld)
+	resolvedWorld, err := resolveWorldConfig(yamlBytes)
 	if err != nil {
 		log.Printf("【GitOps 検証エラー】%v", err)
 		notifyGitOpsError(fmt.Sprintf("`worlds.yaml` の事前検証に失敗したため、設定の反映をスキップしました。\n**エラー内容**: %v", err))
-		return
+		return nil, err
 	}
 
 	if !isGCEInstanceRunning() {
-		log.Println("GCE が停止中のため、ゲーム内ルールのインジェクションをスキップしました")
-		return
+		log.Printf("GCE が停止中のため、ゲーム内ルールのインジェクションをスキップしました (設定ワールド: %s)", resolvedWorld.ID)
+		notifyGitOpsInfo(fmt.Sprintf("サーバー停止中のため、`worlds.yaml` の変更（有効ワールド: %s）は次回起動時に反映されます。現在のワールドと異なる場合は起動後に切り替えが行われます。", resolvedWorld.DisplayLabel()))
+		return resolvedWorld, nil
 	}
 
-	// 3. 稼働中サーバーへのルール適用 (Hot Reload)
-	for _, cmdStr := range cmds {
-		_, _ = executeRemoteCommandGetStdout(fmt.Sprintf("sudo docker exec minecraft-bedrock send-command \"%s\"", cmdStr))
+	previousWorldID, err := switchWorldIfNeeded(resolvedWorld)
+	if err != nil {
+		log.Printf("【GitOps ワールド切り替えエラー】%v", err)
+		notifyGitOpsError(fmt.Sprintf("ワールド %s への切り替えに失敗しました。\n**エラー内容**: %v", resolvedWorld.DisplayLabel(), err))
+		return resolvedWorld, err
 	}
-	log.Println("【Hot Reload 完了】Gamerules を稼働中のマインクラフトサーバーへ即時適用しました")
-	notifyGitOpsSuccess()
+	if previousWorldID != "" {
+		notifyGitOpsInfo(fmt.Sprintf("ワールドを `%s` から %s へ切り替えます（旧ワールドのバックアップ済み）。", previousWorldID, resolvedWorld.DisplayLabel()))
+	}
+
+	// Bedrock drops console commands sent before "Server started.", and itzg resets difficulty to "easy" in server.properties on every container recreation.
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer readyCancel()
+	if err := waitForBedrockServerReady(readyCtx, 3*time.Second, resolvedWorld.ID); err != nil {
+		log.Printf("【GitOps サーバー準備待機エラー】%v", err)
+		notifyGitOpsError(fmt.Sprintf("ワールド %s の起動完了待機中にエラーが発生しました。\n**エラー内容**: %v", resolvedWorld.DisplayLabel(), err))
+		return resolvedWorld, err
+	}
+
+	batchScript := buildBatchSendCommandScript(resolvedWorld.Commands)
+	if _, err := executeRemoteCommandWithTimeout(batchScript, 60*time.Second); err != nil {
+		log.Printf("【Hot Reload 失敗】コマンド一括送信エラー: %v", err)
+		notifyGitOpsError(fmt.Sprintf("ワールド %s へのゲーム内ルール適用に失敗しました。\n**エラー内容**: %v", resolvedWorld.DisplayLabel(), err))
+		return resolvedWorld, err
+	}
+
+	log.Printf("【Hot Reload 完了】ワールド %s (%s) へ Gamerules を適用しました", resolvedWorld.Name, resolvedWorld.ID)
+	notifyGitOpsSuccess(resolvedWorld)
+	return resolvedWorld, nil
 }
 
 func notifyGitOpsError(reason string) {
 	if globalDiscordSession != nil && NotificationChannel != "" {
 		embed := &discordgo.MessageEmbed{
-			Title:       "⚠️ GitOps 設定検証エラー",
+			Title:       "⚠️ GitOps 設定検証・適用エラー",
 			Description: reason,
-			Color:       0xE74C3C, // 赤
+			Color:       0xE74C3C,
 			Timestamp:   time.Now().Format(time.RFC3339),
 		}
 		_, _ = globalDiscordSession.ChannelMessageSendEmbed(NotificationChannel, embed)
 	}
 }
 
-func notifyGitOpsSuccess() {
+func notifyGitOpsInfo(message string) {
 	if globalDiscordSession != nil && NotificationChannel != "" {
+		_, _ = globalDiscordSession.ChannelMessageSend(NotificationChannel, "🔄 "+message)
+	}
+}
+
+func notifyGitOpsSuccess(world *ResolvedWorldConfig) {
+	if globalDiscordSession != nil && NotificationChannel != "" {
+		worldLabel := "kiseki"
+		if world != nil {
+			worldLabel = world.DisplayLabel()
+		}
 		embed := &discordgo.MessageEmbed{
 			Title:       "✅ GitOps 設定適用完了",
-			Description: "`worlds.yaml` の更新を検知し、ゲーム内設定を稼働中サーバーへ即時適用しました。",
-			Color:       0x2ECC71, // 緑
+			Description: fmt.Sprintf("ワールド %s のゲーム内設定を稼働中サーバーへ適用しました。", worldLabel),
+			Color:       0x2ECC71,
 			Timestamp:   time.Now().Format(time.RFC3339),
 		}
 		_, _ = globalDiscordSession.ChannelMessageSendEmbed(NotificationChannel, embed)

@@ -1,6 +1,6 @@
 variables {
   project_id          = "test-project-12345"
-  allow_list_users    = "MockPencil3834,DaftBurrito7340"
+  allow_list_users    = "PlayerOne,PlayerTwo"
   discord_webhook_url = "https://discord.com/api/webhooks/mock/test"
 }
 

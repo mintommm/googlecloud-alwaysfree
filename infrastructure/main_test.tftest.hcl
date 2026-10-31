@@ -1,6 +1,6 @@
 variables {
   project_id       = "test-project-12345"
-  allow_list_users = "MockPencil3834,DaftBurrito7340"
+  allow_list_users = "PlayerOne,PlayerTwo"
 }
 
 run "verify_backup_bucket_config" {

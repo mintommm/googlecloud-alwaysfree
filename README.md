@@ -69,14 +69,15 @@ graph TD
   - ログストリーム監視により、プレイヤー退出で0人になった時点から10分で自動停止タイマー（`triggerEmptyServerTimerLocked`）を起動する。
   - Bot起動時およびストリーム接続確立時に`syncOnlinePlayersDirect`（`send-command "list"`）を実行して実オンライン人数を照合する。プレイヤーが存在する場合はタイマーを解除して再デプロイ時の誤停止を防ぎ、0人であった場合はその時点から10分自動停止タイマーを起動して無人稼働の放置を防ぐ。
 - **ストリーミングバックアップ基盤 ＆ GCSバージョニング**:
-  - 1時間ごとのサイレント定期実行＋手動`/backup`＋停止時実行。
-  - `google/cloud-sdk:alpine`コンテナ標準搭載の`gzip`（`tar -czf -`）による標準出力パイプラインで`gs://${project_id}-minecraft-backup/world-data-kiseki.tar.gz`へ直接ストリーミング保存する。
+  - 1時間ごとのサイレント定期実行＋手動`/backup`＋停止時実行＋ワールド切替時退避。
+  - Minecraftの`/data/server.properties`（`level-name`）から現在稼働中のワールドIDを取得し、`google/cloud-sdk:alpine`コンテナ標準搭載の`gzip`（`tar -czf -`）による標準出力パイプラインで`gs://${project_id}-minecraft-backup/world-data-<world_id>.tar.gz`へワールド別に直接ストリーミング保存する。
   - GCSバケットのバージョニングを最新5世代（`num_newer_versions = 5, with_state = "ARCHIVED"`）に制限し、容量超過課金を防止。
-- **GitOps Webhook Hot Reloadエンジン**:
+- **GitOps Webhook Hot Reload ＆ マルチワールド切替エンジン**:
   - Cloudflare Proxy（`https://alwaysfree.krmtn.org/webhook`）経由でポート`80/webhook`（環境変数`WEBHOOK_PORT`で変更可）にてHTTP POSTを受信。`X-Hub-Signature-256`によるHMAC-SHA256署名検証（`http.MaxBytesReader` 1MB制限）。
   - GCE上の`/opt/minecraft-controller/config-repo`で`git pull origin main`を実行し、`worlds.yaml`をパース。
-  - `defaults.settings`に基づく事前検証を行い、未定義キーや構文エラー検知時はDiscordへエラー通知を送信して中断。
-  - 検証通過時はアクティブワールドの設定を`send-command`で稼働中コンテナへ反映（Hot Reload）。サーバー起動時（`/start`完了時）にも自動同期を実行。
+  - `active_world`（必須）が`worlds[].id`に存在しない、`defaults.settings`に未定義のキーがある等の不整合は、Discordへエラー通知を送信して反映を中断する。
+  - `worlds.yaml`の`active_world`と`minecraft01`上の`/data/server.properties`（`level-name`）を照合し、異なる場合はBedrock Dedicated Serverの通常手順に従ってワールドを切り替える: コンテナ停止 ➔ 旧ワールドのGCS退避（失敗時は中断） ➔ `server.properties`の`level-name` / `level-seed`を書き換え ➔ コンテナ削除 ➔ `google_metadata_script_runner startup`で`minecraft-startup.sh`を再実行（必要ならGCSリストア）。
+  - サーバー起動時（`/start`）およびワールド切り替え後は、`google-startup-scripts.service`の完了とBedrockサーバーの`"Server started."`ログ出力を待機した上で、単一SSHセッション内のバッチ送信（`sleep 0.3`間隔）によりアクティブワールドのルール（`difficulty`, `gamerule`）を反映する。
 
 ---
 
@@ -108,7 +109,7 @@ graph TD
 - **ファイアウォール設定 (`firewall.tf`)**:
   ポート`80/tcp`・`8080/tcp`（Cloudflare経由のGitHub Webhook受信用）、ポート`22/tcp`（GCP IAP `35.235.240.0/20`からのSSH用）、ポート`19132/udp`（Minecraft Bedrockゲーム通信用）、およびVPC内部通信（`10.128.0.0/9`）のINGRESS通信を許可。
 - **起動時自動ディザスタリカバリ (`minecraft-startup.sh`)**:
-  コンテナ起動時にボリューム内にワールドデータが存在しない場合、GCSバケットから最新のバックアップアーカイブ（`world-data-kiseki.tar.gz`、フォールバックとして`world-data-kiseki.tar.xz`）を自動ダウンロード・解凍して復旧。
+  コンテナ起動時に永続ボリューム内の`/data/server.properties`から`level-name`と`level-seed`を読み取り（未作成時は`kiseki`）、`/data/worlds/<level-name>`が存在しない場合はGCSバケットから該当ワールドの最新バックアップアーカイブ（`world-data-<level-name>.tar.gz`、フォールバックとして`.tar.xz`）を自動ダウンロード・解凍して復旧。
 - **コンテナログ容量制限**: `max-size=30m, max-file=3`によりディスク容量枯渇を防止。
 - **Native / Rootless Podmanテストランナー (`test-terraform.sh`)**:
   - 公式コンテナイメージ（`docker.io/hashicorp/terraform:1.11.4`）をRootless Podman上で実行、またはネイティブの`terraform` CLIで同一のテストを実行可能。
@@ -127,7 +128,7 @@ graph TD
 # 全モジュールのテストを一括実行
 make test
 
-# モジュール別: Minecraft Controller (Go Bot: 9件)
+# モジュール別: Minecraft Controller (Go Bot: 13件)
 make test-minecraft-controller
 
 # モジュール別: マネーフォワードME to BigQuery (Python & Shell)

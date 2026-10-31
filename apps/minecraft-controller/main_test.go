@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-// 1. コマンドサニタイズ（先頭スラッシュ自動除去）テスト
 func TestSanitizeMinecraftCommand(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -35,7 +34,6 @@ func TestSanitizeMinecraftCommand(t *testing.T) {
 	}
 }
 
-// 2. Cloud Logging 型安全ログ抽出テスト (textPayload, jsonPayload, stdout: 除去)
 func TestExtractCleanLogMessage(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -55,10 +53,10 @@ func TestExtractCleanLogMessage(t *testing.T) {
 		{
 			name: "Fluentd jsonPayload with message key",
 			payload: map[string]interface{}{
-				"message": "Player connected: MockPencil3834",
+				"message": "Player connected: PlayerOne",
 				"stream":  "stdout",
 			},
-			expected: "Player connected: MockPencil3834",
+			expected: "Player connected: PlayerOne",
 		},
 		{
 			name: "Docker jsonPayload with log key",
@@ -79,7 +77,6 @@ func TestExtractCleanLogMessage(t *testing.T) {
 	}
 }
 
-// 3. GitHub Webhook HMAC-SHA256 署名検証テスト
 func TestVerifyHMACSignature(t *testing.T) {
 	secret := "test_webhook_secret_key_12345"
 	payload := []byte(`{"ref":"refs/heads/main","commits":[{"message":"update worlds.yaml"}]}`)
@@ -98,7 +95,6 @@ func TestVerifyHMACSignature(t *testing.T) {
 	}
 }
 
-// 4. GCP メタデータサーバー仕様テスト (Metadata-Flavor: Google ヘッダー検証)
 func TestGCPMetadataExternalIPMock(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flavor := r.Header.Get("Metadata-Flavor")
@@ -137,7 +133,6 @@ func TestGCPMetadataExternalIPMock(t *testing.T) {
 	}
 }
 
-// 5. Cloudflare v4 REST API 仕様テスト (JSON Envelope レスポンス検証)
 func TestCloudflareDNSEnvelopeMock(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -181,30 +176,29 @@ func TestCloudflareDNSEnvelopeMock(t *testing.T) {
 	}
 }
 
-// 6. プレイヤー参加/退出イベント正規表現テスト
 func TestPlayerEventRegex(t *testing.T) {
-	joinLog := "[15:30:12] Player connected: MockPencil3834, xuid: 12345678"
+	joinLog := "[15:30:12] Player connected: PlayerOne, xuid: 12345678"
 	if matches := regexPlayerJoin.FindStringSubmatch(joinLog); len(matches) > 1 {
-		if matches[1] != "MockPencil3834" {
-			t.Errorf("Expected player MockPencil3834, got %s", matches[1])
+		if matches[1] != "PlayerOne" {
+			t.Errorf("Expected player PlayerOne, got %s", matches[1])
 		}
 	} else {
 		t.Errorf("Failed to match player join log")
 	}
 
-	leftLog := "[15:40:00] Player disconnected: superkurute, xuid: 87654321"
+	leftLog := "[15:40:00] Player disconnected: PlayerTwo, xuid: 87654321"
 	if matches := regexPlayerLeft.FindStringSubmatch(leftLog); len(matches) > 1 {
-		if matches[1] != "superkurute" {
-			t.Errorf("Expected player superkurute, got %s", matches[1])
+		if matches[1] != "PlayerTwo" {
+			t.Errorf("Expected player PlayerTwo, got %s", matches[1])
 		}
 	} else {
 		t.Errorf("Failed to match player leave log")
 	}
 }
 
-// 7. GitOps 宣言的設定パース＆事前検証（reconcileWorldConfig）テスト
-func TestReconcileWorldConfig(t *testing.T) {
-	validYAML := []byte(`
+func TestResolveWorldConfig(t *testing.T) {
+	baseYAML := `
+active_world: "%s"
 defaults:
   settings:
     difficulty: "easy"
@@ -215,7 +209,7 @@ defaults:
 
 worlds:
   - id: "kiseki"
-    name: "Lili's world"
+    name: "Main World"
     emoji: "🌍"
     settings:
       seed: "12345"
@@ -230,59 +224,80 @@ worlds:
     settings:
       difficulty: "normal"
       pvp: true
-`)
+`
+	yamlFor := func(active string) []byte {
+		return []byte(strings.ReplaceAll(baseYAML, "%s", active))
+	}
+
+	assertCommands := func(t *testing.T, got, want []string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("got %d commands %v, want %d %v", len(got), got, len(want), want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("cmd[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
 
 	t.Run("Success_ActiveWorldKiseki", func(t *testing.T) {
-		cmds, err := reconcileWorldConfig(validYAML, "kiseki")
+		resolved, err := resolveWorldConfig(yamlFor("kiseki"))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-
-		expected := []string{
+		if resolved.ID != "kiseki" || resolved.Seed != "12345" {
+			t.Errorf("resolved = %+v, want ID=kiseki Seed=12345", resolved)
+		}
+		assertCommands(t, resolved.Commands, []string{
 			"difficulty peaceful",
 			"gamerule dofiretick false",
 			"gamerule keepinventory true",
 			"gamerule pvp false",
 			"gamerule showcoordinates true",
-		}
-
-		if len(cmds) != len(expected) {
-			t.Fatalf("got %d commands, want %d", len(cmds), len(expected))
-		}
-		for i, cmd := range cmds {
-			if cmd != expected[i] {
-				t.Errorf("cmd[%d] = %q, want %q", i, cmd, expected[i])
-			}
-		}
+		})
 	})
 
 	t.Run("Success_FallbackToDefaultsForOmittedSettings", func(t *testing.T) {
-		cmds, err := reconcileWorldConfig(validYAML, "lobby")
+		resolved, err := resolveWorldConfig(yamlFor("lobby"))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-
-		// lobby では dofiretick, keepinventory, showcoordinates が未指定のため defaults から自動復元
-		expected := []string{
+		if resolved.Seed != "" {
+			t.Errorf("Seed = %q, want empty", resolved.Seed)
+		}
+		assertCommands(t, resolved.Commands, []string{
 			"difficulty normal",
 			"gamerule dofiretick true",
 			"gamerule keepinventory false",
 			"gamerule pvp true",
 			"gamerule showcoordinates false",
-		}
+		})
+	})
 
-		if len(cmds) != len(expected) {
-			t.Fatalf("got %d commands, want %d", len(cmds), len(expected))
+	t.Run("Error_MissingActiveWorld", func(t *testing.T) {
+		_, err := resolveWorldConfig(yamlFor(""))
+		if err == nil {
+			t.Fatalf("expected error for missing active_world, got nil")
 		}
-		for i, cmd := range cmds {
-			if cmd != expected[i] {
-				t.Errorf("cmd[%d] = %q, want %q", i, cmd, expected[i])
-			}
+		if !strings.Contains(err.Error(), "active_world") {
+			t.Errorf("error %q should mention active_world", err.Error())
+		}
+	})
+
+	t.Run("Error_UndefinedActiveWorld", func(t *testing.T) {
+		_, err := resolveWorldConfig(yamlFor("nonexistent_world"))
+		if err == nil {
+			t.Fatalf("expected error for undefined active_world, got nil")
+		}
+		if !strings.Contains(err.Error(), "nonexistent_world") {
+			t.Errorf("error %q should mention nonexistent_world", err.Error())
 		}
 	})
 
 	t.Run("Error_MissingDefaultsKey", func(t *testing.T) {
 		invalidYAML := []byte(`
+active_world: "kiseki"
 defaults:
   settings:
     difficulty: "easy"
@@ -295,7 +310,7 @@ worlds:
       pvp: false
       unknown_rule: true
 `)
-		_, err := reconcileWorldConfig(invalidYAML, "kiseki")
+		_, err := resolveWorldConfig(invalidYAML)
 		if err == nil {
 			t.Fatalf("expected error for missing defaults key, got nil")
 		}
@@ -306,19 +321,19 @@ worlds:
 
 	t.Run("Error_NoDefaultsSection", func(t *testing.T) {
 		noDefaultsYAML := []byte(`
+active_world: "kiseki"
 worlds:
   - id: "kiseki"
     settings:
       difficulty: "peaceful"
 `)
-		_, err := reconcileWorldConfig(noDefaultsYAML, "kiseki")
+		_, err := resolveWorldConfig(noDefaultsYAML)
 		if err == nil {
 			t.Fatalf("expected error for missing defaults section, got nil")
 		}
 	})
 }
 
-// 8. Compute Engine v1 REST API status and natIP parsing test
 func TestFetchGCEInstanceStatusAndIPMock(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -374,14 +389,13 @@ func TestFetchGCEInstanceStatusAndIPMock(t *testing.T) {
 	}
 }
 
-// 9. Auto-shutdown timer state transition on 0-player sync test
 func TestTriggerEmptyServerTimer(t *testing.T) {
 	PlayersMutex.Lock()
 	CurrentPlayers = 0
 	isTimerActive = false
 	triggerEmptyServerTimerLocked(nil)
 	activeAfterZeroSync := isTimerActive
-	// Reset timer state so background sleep goroutine becomes a no-op
+	// Reset timer state so background sleep goroutine becomes a no-op.
 	isTimerActive = false
 	PlayersMutex.Unlock()
 
@@ -390,3 +404,129 @@ func TestTriggerEmptyServerTimer(t *testing.T) {
 	}
 }
 
+func TestParseServerPropertiesLevelName(t *testing.T) {
+	props := "#Minecraft server properties\r\n#level-name=commented_out\r\ngamemode=survival\r\nlevel-name=kiseki\r\nlevel-seed=12345\r\n"
+	if got := parseServerPropertiesLevelName(props); got != "kiseki" {
+		t.Errorf("parseServerPropertiesLevelName() = %q, want %q", got, "kiseki")
+	}
+
+	invalidProps := "level-name=../invalid/path\n"
+	if got := parseServerPropertiesLevelName(invalidProps); got != "" {
+		t.Errorf("parseServerPropertiesLevelName(invalid) = %q, want empty string", got)
+	}
+}
+
+func TestBuildWorldSwitchScript(t *testing.T) {
+	t.Run("Success_RewritesLevelNameAndSeed", func(t *testing.T) {
+		script, err := buildWorldSwitchScript(&ResolvedWorldConfig{ID: "lobby", Seed: "-12345"})
+		if err != nil {
+			t.Fatalf("buildWorldSwitchScript() unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"set -e",
+			`s/^level-name=.*/level-name=lobby/`,
+			`s/^level-seed=.*/level-seed=-12345/`,
+			"/data/server.properties",
+			"sudo docker rm -f minecraft-bedrock",
+			"sudo google_metadata_script_runner startup",
+		} {
+			if !strings.Contains(script, want) {
+				t.Errorf("script missing %q:\n%s", want, script)
+			}
+		}
+	})
+
+	t.Run("Success_EmptySeedMeansRandom", func(t *testing.T) {
+		script, err := buildWorldSwitchScript(&ResolvedWorldConfig{ID: "kiseki", Seed: ""})
+		if err != nil {
+			t.Fatalf("buildWorldSwitchScript() unexpected error: %v", err)
+		}
+		if !strings.Contains(script, `s/^level-seed=.*/level-seed=/`) {
+			t.Errorf("script should clear level-seed:\n%s", script)
+		}
+	})
+
+	t.Run("Error_RejectsUnsafeValues", func(t *testing.T) {
+		cases := []*ResolvedWorldConfig{
+			nil,
+			{ID: "../etc", Seed: ""},
+			{ID: "lobby/x", Seed: ""},
+			{ID: "lobby", Seed: "12/34"},
+			{ID: "lobby", Seed: "abc"},
+			{ID: "lobby", Seed: `"; rm -rf /`},
+		}
+		for _, c := range cases {
+			if _, err := buildWorldSwitchScript(c); err == nil {
+				t.Errorf("expected error for %+v, got nil", c)
+			}
+		}
+	})
+}
+
+func TestBuildBatchCommandAndBackupScripts(t *testing.T) {
+	cmds := []string{"difficulty peaceful", "gamerule keepinventory true"}
+	batchScript := buildBatchSendCommandScript(cmds)
+	if !strings.HasPrefix(batchScript, "set -e\n") {
+		t.Errorf("batchScript should start with 'set -e', got: %s", batchScript)
+	}
+	if !strings.Contains(batchScript, "sleep 0.3") {
+		t.Errorf("batchScript should contain 'sleep 0.3', got: %s", batchScript)
+	}
+	if !strings.Contains(batchScript, `sudo docker exec minecraft-bedrock send-command "difficulty peaceful"`) {
+		t.Errorf("batchScript missing first command: %s", batchScript)
+	}
+
+	backupScript, err := buildWorldBackupScript("test-proj", "kiseki")
+	if err != nil {
+		t.Fatalf("buildWorldBackupScript() unexpected error: %v", err)
+	}
+	if !strings.Contains(backupScript, `gs://test-proj-minecraft-backup/world-data-${WORLD_ID}.tar.gz`) {
+		t.Errorf("backupScript missing expected GCS path: %s", backupScript)
+	}
+
+	if _, err := buildWorldBackupScript("test-proj", "../bad"); err == nil {
+		t.Errorf("expected error for invalid worldID in buildWorldBackupScript, got nil")
+	}
+}
+
+func TestWaitForBedrockServerReadyWithRunner(t *testing.T) {
+	t.Run("Success_ReadyAfterPolling", func(t *testing.T) {
+		outputs := []string{
+			"WAITING:startup_state=activating,mono=0",
+			"WAITING:world_loading",
+			"READY",
+		}
+		idx := 0
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		err := waitForBedrockServerReadyWithRunner(ctx, 10*time.Millisecond, "kiseki", func(cmd string) (string, error) {
+			out := outputs[idx]
+			if idx < len(outputs)-1 {
+				idx++
+			}
+			return out, nil
+		})
+		if err != nil {
+			t.Fatalf("waitForBedrockServerReadyWithRunner() unexpected error: %v", err)
+		}
+		if idx != 2 {
+			t.Errorf("expected 2 state transitions before READY, got %d", idx)
+		}
+	})
+
+	t.Run("Error_TimeoutIncludesLastStatus", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+
+		err := waitForBedrockServerReadyWithRunner(ctx, 10*time.Millisecond, "kiseki", func(cmd string) (string, error) {
+			return "WAITING:world_loading", nil
+		})
+		if err == nil {
+			t.Fatalf("expected timeout error, got nil")
+		}
+		if !strings.Contains(err.Error(), "WAITING:world_loading") {
+			t.Errorf("error %q should include last status 'WAITING:world_loading'", err.Error())
+		}
+	})
+}
