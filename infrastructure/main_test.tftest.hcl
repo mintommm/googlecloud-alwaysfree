@@ -67,3 +67,37 @@ run "verify_minecraft01_ssh_metadata" {
     error_message = "minecraft01 に cloud-platform スコープの service_account が設定されていません"
   }
 }
+
+run "verify_minecraft_bedrock_network_config" {
+  command = plan
+
+  assert {
+    condition     = contains([for a in google_compute_firewall.allow_minecraft_bedrock.allow : a.protocol if contains(a.ports, "19132")], "tcp")
+    error_message = "Minecraft Bedrock の TCP 19132 ポートがファイアウォールで許可されていません"
+  }
+
+  assert {
+    condition     = contains([for a in google_compute_firewall.allow_minecraft_bedrock.allow : a.protocol if contains(a.ports, "19132") && contains(a.ports, "19140-19155")], "udp")
+    error_message = "Minecraft Bedrock の UDP 19132 および 19140-19155 ポートがファイアウォールで許可されていません"
+  }
+
+  assert {
+    condition     = strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "-p tcp --dport 19132 -j ACCEPT") && strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "-p udp --dport 19140:19155 -j ACCEPT")
+    error_message = "startup-script にホスト iptables の TCP 19132 および UDP 19140:19155 許可設定が含まれていません"
+  }
+
+  assert {
+    condition     = strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "EXTERNAL_IP=$(curl -fsSL -H \"Metadata-Flavor: Google\" \"http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip\")")
+    error_message = "startup-script に GCE メタデータサーバーからの EXTERNAL_IP 取得設定が含まれていません"
+  }
+
+  assert {
+    condition     = strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "-p 19132:19132/tcp") && strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "-p 19140-19155:19140-19155/udp")
+    error_message = "startup-script に NetherNet 用の Docker ポート公開設定が含まれていません"
+  }
+
+  assert {
+    condition     = strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "-e TRANSPORT=nethernet") && strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "-e SERVER_UDP_PORTS=\"$EXTERNAL_IP:19140-19155:19140-19155\"")
+    error_message = "startup-script に TRANSPORT=nethernet および SERVER_UDP_PORTS 設定が含まれていません"
+  }
+}

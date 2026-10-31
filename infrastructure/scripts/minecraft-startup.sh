@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# Container-Optimized OS host iptables drops incoming UDP by default even when VPC firewall allows 19132/udp.
+# Container-Optimized OS host iptables drops incoming traffic by default even when VPC firewall allows it.
+/sbin/iptables -C INPUT -p tcp --dport 19132 -j ACCEPT 2>/dev/null || /sbin/iptables -I INPUT 1 -p tcp --dport 19132 -j ACCEPT
 /sbin/iptables -C INPUT -p udp --dport 19132 -j ACCEPT 2>/dev/null || /sbin/iptables -I INPUT 1 -p udp --dport 19132 -j ACCEPT
+/sbin/iptables -C INPUT -p udp --dport 19140:19155 -j ACCEPT 2>/dev/null || /sbin/iptables -I INPUT 1 -p udp --dport 19140:19155 -j ACCEPT
 
 mkdir -p /var/minecraft/staging
 chmod 777 /var/minecraft/staging
@@ -47,15 +49,22 @@ if [ ! -d "/data/worlds/$ACTIVE_WORLD" ]; then
 fi
 ' || true
 
+# NetherNet requires advertising the host external IPv4 address for WebRTC UDP candidate negotiation across Docker bridge NAT.
+EXTERNAL_IP=$(curl -fsSL -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip")
+
 # -i keeps stdin open, which is required for docker exec send-command console injection.
 docker run -d -i \
     --name=$CONTAINER_NAME \
     --restart=always \
     --log-opt max-size=30m \
     --log-opt max-file=3 \
+    -p 19132:19132/tcp \
     -p 19132:19132/udp \
+    -p 19140-19155:19140-19155/udp \
     -v minecraft-data:/data \
     -e EULA=TRUE \
+    -e TRANSPORT=nethernet \
+    -e SERVER_UDP_PORTS="$EXTERNAL_IP:19140-19155:19140-19155" \
     -e ALLOW_LIST=true \
     -e ALLOW_LIST_USERS="${allow_list_users}" \
     -e LEVEL_NAME="$ACTIVE_WORLD" \

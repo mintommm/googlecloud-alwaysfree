@@ -3,8 +3,13 @@ resource "google_compute_firewall" "allow_minecraft_bedrock" {
   network = "default"
 
   allow {
-    protocol = "udp"
+    protocol = "tcp"
     ports    = ["19132"]
+  }
+
+  allow {
+    protocol = "udp"
+    ports    = ["19132", "19140-19155"]
   }
 
   source_ranges = ["0.0.0.0/0"]

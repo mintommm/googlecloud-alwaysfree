@@ -107,15 +107,15 @@ graph TD
   - リプレイス禁止のMinecraftインフラ（`main.tf`）と、マネーフォワード連携（`moneyforwardme-to-bigquery.tf`）を分離。
   - `always_free`の`startup-script`定義もlocals経由で`moneyforwardme-to-bigquery.tf`に集約し、`main.tf`への変更を最小限に抑制。
 - **ファイアウォール設定 (`firewall.tf`)**:
-  ポート`80/tcp`・`8080/tcp`（Cloudflare経由のGitHub Webhook受信用）、ポート`22/tcp`（GCP IAP `35.235.240.0/20`からのSSH用）、ポート`19132/udp`（Minecraft Bedrockゲーム通信用）、およびVPC内部通信（`10.128.0.0/9`）のINGRESS通信を許可。
-- **起動時自動ディザスタリカバリ (`minecraft-startup.sh`)**:
-  コンテナ起動時に永続ボリューム内の`/data/server.properties`から`level-name`と`level-seed`を読み取り（未作成時は`kiseki`）、`/data/worlds/<level-name>`が存在しない場合はGCSバケットから該当ワールドの最新バックアップアーカイブ（`world-data-<level-name>.tar.gz`、フォールバックとして`.tar.xz`）を自動ダウンロード・解凍して復旧。
+  ポート`80/tcp`・`8080/tcp`（Cloudflare経由のGitHub Webhook受信用）、ポート`22/tcp`（GCP IAP `35.235.240.0/20`からのSSH用）、ポート`19132/tcp`（Minecraft Bedrock NetherNetシグナリング用）、ポート`19132/udp`・`19140-19155/udp`（Minecraft Bedrockゲーム通信用）、およびVPC内部通信（`10.128.0.0/9`）のINGRESS通信を許可。
+- **起動時自動ディザスタリカバリ ＆ NetherNet構成 (`minecraft-startup.sh`)**:
+  コンテナ起動時に永続ボリューム内の`/data/server.properties`から`level-name`と`level-seed`を読み取り（未作成時は`kiseki`）、`/data/worlds/<level-name>`が存在しない場合はGCSバケットから該当ワールドの最新バックアップアーカイブ（`world-data-<level-name>.tar.gz`、フォールバックとして`.tar.xz`）を自動ダウンロード・解凍して復旧。GCEメタデータサーバーからインスタンスの外部IPv4アドレスを取得し、`TRANSPORT=nethernet`および`SERVER_UDP_PORTS="<external_ip>:19140-19155:19140-19155"`を指定してコンテナを起動。
 - **コンテナログ容量制限**: `max-size=30m, max-file=3`によりディスク容量枯渇を防止。
 - **Native / Rootless Podmanテストランナー (`test-terraform.sh`)**:
   - 公式コンテナイメージ（`docker.io/hashicorp/terraform:1.11.4`）をRootless Podman上で実行、またはネイティブの`terraform` CLIで同一のテストを実行可能。
   - リポジトリルートを`/workspace`へマウントし（`fmt -check`時は`:ro`）、`-backend=false`によりホスト改変とクレデンシャル漏洩を遮断しつつ`../apps/`配下のファイルハッシュ参照（`filesha1`）および`override_during = plan`を検証。
 - **ネイティブ仕様アサーション (`*.tftest.hcl`)**:
-  - `main_test.tftest.hcl`: バックアップバケット、ファイアウォール、デプロイ一時バケット、`minecraft01`のSSHメタデータおよびサービスアカウントスコープの検証（全4件）。
+  - `main_test.tftest.hcl`: バックアップバケット、ファイアウォール、デプロイ一時バケット、`minecraft01`のSSHメタデータ・サービスアカウントスコープ・NetherNetネットワーク設定の検証（全5件）。
   - `moneyforwardme-to-bigquery_test.tftest.hcl`: BigQueryデータセット・テーブル・重複排除ビュー、Secret Manager、Cloud Runサービス、IAM最小権限、GCE `systemd timer`設定の検証（全5件）。
 
 ---
@@ -137,8 +137,8 @@ make test-moneyforwardme-to-bigquery-python  # pytest (34件)
 make test-moneyforwardme-to-bigquery-shell   # bash (12件)
 
 # モジュール別: インフラ (Terraform 品質ゲート)
-make test-infra                             # 全インフラテスト (9件)
-make test-infra-minecraft                   # Minecraft & コアインフラテスト (4件)
+make test-infra                             # 全インフラテスト (10件)
+make test-infra-minecraft                   # Minecraft & コアインフラテスト (5件)
 make test-infra-moneyforwardme-to-bigquery  # マネーフォワードMEインフラテスト (5件)
 ```
 
