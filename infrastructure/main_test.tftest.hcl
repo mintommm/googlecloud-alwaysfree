@@ -100,4 +100,9 @@ run "verify_minecraft_bedrock_network_config" {
     condition     = strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "-e TRANSPORT=nethernet") && strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "-e SERVER_UDP_PORTS=\"$EXTERNAL_IP:19140-19155:19140-19155\"")
     error_message = "startup-script に TRANSPORT=nethernet および SERVER_UDP_PORTS 設定が含まれていません"
   }
+
+  assert {
+    condition     = strcontains(google_compute_instance.minecraft01.metadata["startup-script"], "docker pull itzg/minecraft-bedrock-server:latest")
+    error_message = "startup-script に最新 itzg/minecraft-bedrock-server:latest イメージの docker pull が含まれていません"
+  }
 }

@@ -109,7 +109,7 @@ graph TD
 - **ファイアウォール設定 (`firewall.tf`)**:
   ポート`80/tcp`・`8080/tcp`（Cloudflare経由のGitHub Webhook受信用）、ポート`22/tcp`（GCP IAP `35.235.240.0/20`からのSSH用）、ポート`19132/tcp`（Minecraft Bedrock NetherNetシグナリング用）、ポート`19132/udp`・`19140-19155/udp`（Minecraft Bedrockゲーム通信用）、およびVPC内部通信（`10.128.0.0/9`）のINGRESS通信を許可。
 - **起動時自動ディザスタリカバリ ＆ NetherNet構成 (`minecraft-startup.sh`)**:
-  コンテナ起動時に永続ボリューム内の`/data/server.properties`から`level-name`と`level-seed`を読み取り（未作成時は`kiseki`）、`/data/worlds/<level-name>`が存在しない場合はGCSバケットから該当ワールドの最新バックアップアーカイブ（`world-data-<level-name>.tar.gz`、フォールバックとして`.tar.xz`）を自動ダウンロード・解凍して復旧。GCEメタデータサーバーからインスタンスの外部IPv4アドレスを取得し、`TRANSPORT=nethernet`および`SERVER_UDP_PORTS="<external_ip>:19140-19155:19140-19155"`を指定してコンテナを起動。
+  コンテナ起動時に永続ボリューム内の`/data/server.properties`から`level-name`と`level-seed`を読み取り（未作成時は`kiseki`）、`/data/worlds/<level-name>`が存在しない場合はGCSバケットから該当ワールドの最新バックアップアーカイブ（`world-data-<level-name>.tar.gz`、フォールバックとして`.tar.xz`）を自動ダウンロード・解凍して復旧。`itzg/minecraft-bedrock-server:latest`の最新イメージを`docker pull`（および不要なdanglingイメージを整理）した上で、GCEメタデータサーバーからインスタンスの外部IPv4アドレスを取得し、`TRANSPORT=nethernet`および`SERVER_UDP_PORTS="<external_ip>:19140-19155:19140-19155"`を指定してコンテナを起動。
 - **コンテナログ容量制限**: `max-size=30m, max-file=3`によりディスク容量枯渇を防止。
 - **Native / Rootless Podmanテストランナー (`test-terraform.sh`)**:
   - 公式コンテナイメージ（`docker.io/hashicorp/terraform:1.11.4`）をRootless Podman上で実行、またはネイティブの`terraform` CLIで同一のテストを実行可能。

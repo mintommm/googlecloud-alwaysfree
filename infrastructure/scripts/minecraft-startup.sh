@@ -52,6 +52,10 @@ fi
 # NetherNet requires advertising the host external IPv4 address for WebRTC UDP candidate negotiation across Docker bridge NAT.
 EXTERNAL_IP=$(curl -fsSL -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip")
 
+# Always pull the latest image so updated property mappings (e.g. TRANSPORT, SERVER_UDP_PORTS) are applied on long-lived COS disks.
+docker pull itzg/minecraft-bedrock-server:latest || true
+docker image prune -f || true
+
 # -i keeps stdin open, which is required for docker exec send-command console injection.
 docker run -d -i \
     --name=$CONTAINER_NAME \
