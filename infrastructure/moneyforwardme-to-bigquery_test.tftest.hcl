@@ -130,6 +130,11 @@ run "verify_always_free_systemd_timer" {
     condition     = strcontains(google_compute_instance.always_free.metadata["startup-script"], "MemoryMax=256M")
     error_message = "always_free の systemd service にメモリ制限 (MemoryMax=256M) が設定されていません"
   }
+
+  assert {
+    condition     = strcontains(google_compute_instance.always_free.metadata["startup-script"], "OnCalendar=*-*-* 07:00:00 Asia/Tokyo")
+    error_message = "moneyforward-sync.timer の実行時刻が 07:00:00 Asia/Tokyo に設定されていません"
+  }
 }
 
 

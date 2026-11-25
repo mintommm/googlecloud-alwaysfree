@@ -182,7 +182,8 @@ locals {
     Description=MoneyForward ME to BigQuery Daily Sync Timer
 
     [Timer]
-    OnCalendar=*-*-* 04:00:00 Asia/Tokyo
+    # Avoid MoneyForward ME daily maintenance window (01:00-06:00 JST) and post-maintenance congestion
+    OnCalendar=*-*-* 07:00:00 Asia/Tokyo
     Persistent=true
 
     [Install]

@@ -10,7 +10,7 @@ Google Cloud Platform (GCP)のAlways Free（無料枠）インスタンス上で
 graph TD
     subgraph GCE_ALWAYS_FREE ["常駐 GCE インスタンス (always_free: e2-micro / Always Free $0.00)"]
         BOT["apps/minecraft-controller<br/>(Discord Bot / Go 1.26)"]
-        TIMER["systemd timer<br/>(moneyforward-sync.timer: 毎朝04:00 JST)"]
+        TIMER["systemd timer<br/>(moneyforward-sync.timer: 毎朝07:00 JST)"]
         TRIGGER["/usr/local/bin/trigger-moneyforwardme-to-bigquery.sh<br/>(MemoryMax=256M 保護)"]
         TIMER -->|起動| TRIGGER
     end
@@ -93,7 +93,7 @@ graph TD
   - クレジットカードの確定遅延や過去明細修正を追従するため、日次定期実行では当月・先月・前々月の計3ヶ月分をエクスポート。
   - 各明細の全カラム値を結合したSHA256ハッシュ（`row_hash`）を生成し、BigQueryの`MERGE`文（`WHEN NOT MATCHED THEN INSERT`）により未変更行をスキップしてデータ重複を防止。
 - **GCE `systemd timer` による定期実行とメモリ保護**:
-  - 毎朝04:00 JST（`OnCalendar=*-*-* 04:00:00 Asia/Tokyo`）に`systemd timer`で自律起動。
+  - 毎朝07:00 JST（`OnCalendar=*-*-* 07:00:00 Asia/Tokyo`、マネーフォワードMEの夜間メンテナンス01:00〜06:00 JSTを回避）に`systemd timer`で自律起動。
   - `MemoryMax=256M`のcgroupsメモリ上限を設定し、同居するDiscord Botをメモリ圧迫から保護。
   - 実行成否や次回予定時刻は`systemctl list-timers`、詳細ログは`journalctl -u moneyforward-sync.service`で管理。
 - **手元PC用 初回ログインスクリプト (`manual_refresh_session.py`)**:
