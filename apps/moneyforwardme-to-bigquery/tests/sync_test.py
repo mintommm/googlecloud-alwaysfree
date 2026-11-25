@@ -309,20 +309,55 @@ class TestSecretManagerOperations:
         )
 
     @patch("sync.secretmanager.SecretManagerServiceClient")
-    def test_update_secret_adds_version_with_utf8_bytes(self, mock_client_cls):
+    def test_update_secret_adds_version_and_destroys_older_active_versions(self, mock_client_cls):
+        from google.cloud import secretmanager as sm
+
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_resp = MagicMock()
-        mock_resp.name = "projects/test-project-id/secrets/my-secret/versions/2"
+        mock_resp.name = "projects/123456/secrets/my-secret/versions/4"
         mock_client.add_secret_version.return_value = mock_resp
 
+        v1 = MagicMock(name="v1", state=sm.SecretVersion.State.DESTROYED)
+        v1.name = "projects/123456/secrets/my-secret/versions/1"
+        v2 = MagicMock(name="v2", state=sm.SecretVersion.State.DISABLED)
+        v2.name = "projects/123456/secrets/my-secret/versions/2"
+        v3 = MagicMock(name="v3", state=sm.SecretVersion.State.ENABLED)
+        v3.name = "projects/123456/secrets/my-secret/versions/3"
+        v4 = MagicMock(name="v4", state=sm.SecretVersion.State.ENABLED)
+        v4.name = "projects/123456/secrets/my-secret/versions/4"
+        mock_client.list_secret_versions.return_value = [v4, v3, v2, v1]
+
         update_secret("my-secret", '{"new": "data"}')
+
         mock_client.add_secret_version.assert_called_once_with(
             request={
                 "parent": "projects/test-project-id/secrets/my-secret",
                 "payload": {"data": b'{"new": "data"}'},
             }
         )
+        mock_client.list_secret_versions.assert_called_once_with(
+            request={"parent": "projects/test-project-id/secrets/my-secret"}
+        )
+        assert mock_client.destroy_secret_version.call_count == 2
+        mock_client.destroy_secret_version.assert_any_call(
+            request={"name": "projects/123456/secrets/my-secret/versions/3"}
+        )
+        mock_client.destroy_secret_version.assert_any_call(
+            request={"name": "projects/123456/secrets/my-secret/versions/2"}
+        )
+
+    @patch("sync.secretmanager.SecretManagerServiceClient")
+    def test_update_secret_succeeds_even_if_old_version_cleanup_fails(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_resp = MagicMock()
+        mock_resp.name = "projects/123456/secrets/my-secret/versions/2"
+        mock_client.add_secret_version.return_value = mock_resp
+        mock_client.list_secret_versions.side_effect = RuntimeError("permission denied")
+
+        update_secret("my-secret", '{"new": "data"}')
+        mock_client.add_secret_version.assert_called_once()
 
 class TestPayloadAndMonthCalculations:
     """Specification tests for payload parsing edge cases and date calculations."""

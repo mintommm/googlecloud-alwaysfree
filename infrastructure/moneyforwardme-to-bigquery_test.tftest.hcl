@@ -85,8 +85,8 @@ run "verify_iam_permissions" {
   }
 
   assert {
-    condition     = google_secret_manager_secret_iam_member.mf_session_updater.role == "roles/secretmanager.secretVersionAdder"
-    error_message = "Cloud Run SA に secretVersionAdder 権限が付与されていません"
+    condition     = google_secret_manager_secret_iam_member.mf_session_updater.role == "roles/secretmanager.secretVersionManager"
+    error_message = "Cloud Run SA に secretVersionManager 権限が付与されていません"
   }
 
   assert {

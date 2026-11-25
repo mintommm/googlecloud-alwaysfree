@@ -71,7 +71,7 @@ resource "google_secret_manager_secret_iam_member" "mf_session_accessor" {
 
 resource "google_secret_manager_secret_iam_member" "mf_session_updater" {
   secret_id = google_secret_manager_secret.mf_session_cookie.secret_id
-  role      = "roles/secretmanager.secretVersionAdder"
+  role      = "roles/secretmanager.secretVersionManager"
   member    = "serviceAccount:${google_service_account.mf_sync.email}"
 }
 

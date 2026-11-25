@@ -38,6 +38,26 @@ def get_secret(secret_id: str) -> str:
     resp = client.access_secret_version(request={"name": name})
     return resp.payload.data.decode("utf-8")
 
+def prune_old_secret_versions(client, parent: str, keep_version_name: str):
+    """Destroy older active versions so active version count stays within Always Free tier (6/month)."""
+    keep_version_id = keep_version_name.rsplit("/", 1)[-1]
+    try:
+        versions = client.list_secret_versions(request={"parent": parent})
+    except Exception as e:
+        logging.warning(f"Failed to list secret versions for cleanup ({parent}): {e}")
+        return
+
+    for version in versions:
+        if version.state == secretmanager.SecretVersion.State.DESTROYED:
+            continue
+        if version.name.rsplit("/", 1)[-1] == keep_version_id:
+            continue
+        try:
+            client.destroy_secret_version(request={"name": version.name})
+            logging.info(f"Destroyed old secret version: {version.name}")
+        except Exception as e:
+            logging.warning(f"Failed to destroy old secret version '{version.name}': {e}")
+
 def update_secret(secret_id: str, payload: str):
     client = secretmanager.SecretManagerServiceClient()
     parent = f"projects/{PROJECT_ID}/secrets/{secret_id}"
@@ -45,6 +65,7 @@ def update_secret(secret_id: str, payload: str):
         request={"parent": parent, "payload": {"data": payload.encode("utf-8")}}
     )
     logging.info(f"Updated Secret Manager secret '{secret_id}' with new session: {resp.name}")
+    prune_old_secret_versions(client, parent, resp.name)
 
 def notify_discord(message: str):
     if not DISCORD_WEBHOOK_URL:

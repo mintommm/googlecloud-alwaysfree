@@ -88,7 +88,7 @@ graph TD
   - Cloud RunのAlways Free枠（月180,000 vCPU秒 / 360,000 GiB秒 / 200万リクエスト）を活用し、ブラウザ処理を外部委譲。
 - **スライディングセッション自動延長ループ**:
   - マネーフォワードME（有料プラン）の本体セッション（`_moneybook_session`）は1年間の有効期限を持つ。
-  - Cloud Run上の`sync.py`は、CSV取得完了ごとに最新のブラウザストレージ状態（`context.storage_state()`）を取得し、Secret Manager（`mf-session-cookie`）に新しいバージョンとして自動上書き保存。アクセスごとに有効期限が延長され、定期的な手動再認証が不要。
+  - Cloud Run上の`sync.py`は、CSV取得完了ごとに最新のブラウザストレージ状態（`context.storage_state()`）を取得し、Secret Manager（`mf-session-cookie`）に新しいバージョンとして自動保存したうえで古いバージョンを破棄（`DESTROYED`）する。これによりアクセスごとに有効期限を延長しつつ、アクティブバージョン数をAlways Free無料枠（月6バージョン）以内に維持する。
 - **行ハッシュ (`row_hash`) ＋ `MERGE` による重複除外アペンド**:
   - クレジットカードの確定遅延や過去明細修正を追従するため、日次定期実行では当月・先月・前々月の計3ヶ月分をエクスポート。
   - 各明細の全カラム値を結合したSHA256ハッシュ（`row_hash`）を生成し、BigQueryの`MERGE`文（`WHEN NOT MATCHED THEN INSERT`）により未変更行をスキップしてデータ重複を防止。

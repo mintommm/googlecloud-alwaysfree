@@ -65,6 +65,25 @@ def launch_browser(playwright):
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
         return playwright.chromium.launch(headless=False)
 
+def prune_old_secret_versions(client, parent: str, keep_version_name: str):
+    keep_version_id = keep_version_name.rsplit("/", 1)[-1]
+    try:
+        versions = client.list_secret_versions(request={"parent": parent})
+    except Exception as e:
+        print(f"Warning: Failed to list old secret versions for cleanup: {e}")
+        return
+
+    for version in versions:
+        if version.state == secretmanager.SecretVersion.State.DESTROYED:
+            continue
+        if version.name.rsplit("/", 1)[-1] == keep_version_id:
+            continue
+        try:
+            client.destroy_secret_version(request={"name": version.name})
+            print(f"Destroyed old secret version: {version.name}")
+        except Exception as e:
+            print(f"Warning: Failed to destroy old secret version '{version.name}': {e}")
+
 def save_to_secret_manager(credentials, project_id: str, payload: str):
     client = secretmanager.SecretManagerServiceClient(credentials=credentials)
     parent = f"projects/{project_id}/secrets/{SECRET_ID}"
@@ -77,11 +96,13 @@ def save_to_secret_manager(credentials, project_id: str, payload: str):
         print(f"Error: Secret '{SECRET_ID}' not found in project '{project_id}'. Apply Terraform infrastructure first.")
         sys.exit(1)
     except exceptions.PermissionDenied:
-        print(f"Error: Permission denied for secret '{SECRET_ID}'. Verify roles/secretmanager.secretVersionAdder.")
+        print(f"Error: Permission denied for secret '{SECRET_ID}'. Verify roles/secretmanager.secretVersionManager.")
         sys.exit(1)
     except Exception as e:
         print(f"Error: Failed to save to Secret Manager: {e}")
         sys.exit(1)
+
+    prune_old_secret_versions(client, parent, response.name)
 
 def main():
     credentials, project_id = check_gcp_auth()

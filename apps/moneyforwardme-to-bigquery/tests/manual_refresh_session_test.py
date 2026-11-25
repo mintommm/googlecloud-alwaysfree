@@ -42,12 +42,20 @@ class TestSaveToSecretManager:
     """Specification tests for Secret Manager storage and error handling."""
 
     @patch("google.cloud.secretmanager.SecretManagerServiceClient")
-    def test_adds_secret_version_successfully(self, mock_client_cls):
+    def test_adds_secret_version_and_destroys_older_versions(self, mock_client_cls):
+        from google.cloud import secretmanager as sm
+
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_response = MagicMock()
-        mock_response.name = "projects/my-p/secrets/mf-session-cookie/versions/1"
+        mock_response.name = "projects/123/secrets/mf-session-cookie/versions/2"
         mock_client.add_secret_version.return_value = mock_response
+
+        v1 = MagicMock(state=sm.SecretVersion.State.ENABLED)
+        v1.name = "projects/123/secrets/mf-session-cookie/versions/1"
+        v2 = MagicMock(state=sm.SecretVersion.State.ENABLED)
+        v2.name = "projects/123/secrets/mf-session-cookie/versions/2"
+        mock_client.list_secret_versions.return_value = [v2, v1]
 
         mock_creds = MagicMock()
         manual_refresh.save_to_secret_manager(mock_creds, "my-p", '{"test": "data"}')
@@ -57,6 +65,9 @@ class TestSaveToSecretManager:
                 "parent": "projects/my-p/secrets/mf-session-cookie",
                 "payload": {"data": b'{"test": "data"}'},
             }
+        )
+        mock_client.destroy_secret_version.assert_called_once_with(
+            request={"name": "projects/123/secrets/mf-session-cookie/versions/1"}
         )
 
     @patch("google.cloud.secretmanager.SecretManagerServiceClient")
