@@ -42,7 +42,9 @@ def prune_old_secret_versions(client, parent: str, keep_version_name: str):
     """Destroy older active versions so active version count stays within Always Free tier (6/month)."""
     keep_version_id = keep_version_name.rsplit("/", 1)[-1]
     try:
-        versions = client.list_secret_versions(request={"parent": parent})
+        versions = client.list_secret_versions(
+            request={"parent": parent, "filter": "state!=DESTROYED"}
+        )
     except Exception as e:
         logging.warning(f"Failed to list secret versions for cleanup ({parent}): {e}")
         return

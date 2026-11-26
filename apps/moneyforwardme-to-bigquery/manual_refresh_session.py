@@ -68,7 +68,9 @@ def launch_browser(playwright):
 def prune_old_secret_versions(client, parent: str, keep_version_name: str):
     keep_version_id = keep_version_name.rsplit("/", 1)[-1]
     try:
-        versions = client.list_secret_versions(request={"parent": parent})
+        versions = client.list_secret_versions(
+            request={"parent": parent, "filter": "state!=DESTROYED"}
+        )
     except Exception as e:
         print(f"Warning: Failed to list old secret versions for cleanup: {e}")
         return

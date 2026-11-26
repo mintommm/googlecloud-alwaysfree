@@ -337,7 +337,10 @@ class TestSecretManagerOperations:
             }
         )
         mock_client.list_secret_versions.assert_called_once_with(
-            request={"parent": "projects/test-project-id/secrets/my-secret"}
+            request={
+                "parent": "projects/test-project-id/secrets/my-secret",
+                "filter": "state!=DESTROYED",
+            }
         )
         assert mock_client.destroy_secret_version.call_count == 2
         mock_client.destroy_secret_version.assert_any_call(

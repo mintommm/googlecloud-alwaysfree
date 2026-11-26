@@ -66,6 +66,12 @@ class TestSaveToSecretManager:
                 "payload": {"data": b'{"test": "data"}'},
             }
         )
+        mock_client.list_secret_versions.assert_called_once_with(
+            request={
+                "parent": "projects/my-p/secrets/mf-session-cookie",
+                "filter": "state!=DESTROYED",
+            }
+        )
         mock_client.destroy_secret_version.assert_called_once_with(
             request={"name": "projects/123/secrets/mf-session-cookie/versions/1"}
         )
